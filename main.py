@@ -3,6 +3,11 @@ from nanpy import ArduinoApi, SerialManager
 from time import sleep
 
 
+
+############################################################################
+#########################    ARDUINO AND SERIAL CONNEXIONS   ###############
+############################################################################
+
 slave_1 = SerialManager(device='COM9')
 slave_2 = SerialManager(device='COM8')           # Sélection du port série à modifier
 
@@ -11,7 +16,6 @@ slave_2 = SerialManager(device='COM8')           # Sélection du port série à 
 
 uno_1 = ArduinoApi(connection=slave_1)            # Déclaration de la carte Arduino Uno
 mega_1 = ArduinoApi(connection=slave_2) 
-
 
 pinDrill_1 = 11                                  # Led branchée sur broche 11
 intensity = 0
@@ -26,6 +30,13 @@ mega_1.pinMode(pinDrill_1, mega_1.OUTPUT)
 
 #LIGHTS NEON OUTPUT ON
 uno_1.pinMode(pin_relay_1,uno_1.OUTPUT)
+
+
+
+
+############################################################################
+############################### FUNCTIONS DEF ##############################
+############################################################################
 
 #STOP DRILLS
 def stopDrill_1():
@@ -44,6 +55,7 @@ def startMusic():
     mixer.music.load("aqbtcm2.mp3")
     mixer.music.set_volume(0.6)
     mixer.music.play()
+    print ("Starting music")
 
 def stopMusic():
     mixer.music.fadeout(3333)
@@ -64,13 +76,17 @@ def sec_light_off():
     uno_1.digitalWrite(pin_relay_2,0)
 
 
-    
-#p.play()
+   
+#########################################################################
+############################### PROGRAM #################################
+#########################################################################
 
+
+# STARTING MUSIC
 startMusic()
 
-sleep (2)
 
+# FIRST DRILL ON
 #while True :
 for i in range (3):
     uno_1.analogWrite(pinDrill_1, intensity)  # PWM à 200/255
@@ -83,6 +99,8 @@ for i in range (3):
  
 #mixer.music.set_volume(0.2)
 
+
+# SECOND DRILL ON
 for i in range(2):
    
     mega_1.analogWrite(pinDrill_1, 10)   # PWM à 10/255
@@ -99,8 +117,13 @@ for i in range(2):
 '''
 #mixer.music.unpause()
 sleep (4)
+
+
+# STOP MUSIC
 stopMusic()
 sleep (1)
+
+#STOP DRILLS
 stopDrill_1()
 sleep (1)
 stopDrill_2 ()
@@ -109,3 +132,4 @@ sleep (4)
 
 slave_1.close()
 slave_2.close()                      # Fermeture du port série
+

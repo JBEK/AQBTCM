@@ -1,0 +1,15 @@
+h1{
+    color : blueviolet;
+    font-family: 'Courier New', Courier, monospace;
+    text-align: center;
+}
+
+h2 {
+    color: black;
+    font-family: 'Courier New', Courier, monospace;
+    text-align: left;
+}
+
+p{
+    font-family: 'Courier New', Courier, monospace;
+}
