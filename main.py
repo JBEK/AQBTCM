@@ -238,6 +238,7 @@ third_drill_thread = threading.Thread (target=third_drill_prog)
 
 startMusic()                        # STARTING MUSIC
 sleep (1)
+
 i=0
 while i<2:
     fading_in_and_out(mega_drill,pinDrill_1)
