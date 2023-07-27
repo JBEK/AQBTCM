@@ -15,11 +15,20 @@ from threading import Thread
 
 #i=0
 #ARDUINOS
-slave_uno_light = SerialManager(device='COM9')
-slave_mega_drill = SerialManager(device='COM8') 
 
-mega_drill = ArduinoApi(connection=slave_mega_drill)
-uno_light_A = ArduinoApi(connection=slave_uno_light)
+try:
+    slave_mega_drill = SerialManager(device='COM8') 
+    mega_drill = ArduinoApi(connection=slave_mega_drill)
+    print ("Arduino MEGA DRILL connected")
+except:
+    print("Failed to connect to Arduino MEGA (Drill)")
+
+try :
+    slave_uno_light = SerialManager(device='COM9')
+    uno_light_A = ArduinoApi(connection=slave_uno_light)
+    print ("Arduino UNO LIGHT A connected")
+except:
+    print ("Failed to connect to Arduino UNO (Light A)")
 
 
 ####OUTPUT
@@ -38,12 +47,17 @@ uno_light_A.pinMode(neon_A_4,uno_light_A.OUTPUT)
 #DRILLS
 pinDrill_1 = 3
 pinDrill_2 = 5
-pinDrill_3 = 11
+pinDrill_3 = 9
+
 
 mega_drill.pinMode(pinDrill_1,mega_drill.OUTPUT)
 mega_drill.pinMode(pinDrill_2,mega_drill.OUTPUT)
 mega_drill.pinMode(pinDrill_3,mega_drill.OUTPUT)
 
+'''class arduino_uno_light_A :
+    name = ['mega_drill']
+    pin = ['pinDrill_1']
+'''
     ############################################################################
 ##################################    FUNCTIONS DEF  #######################################
     ############################################################################
@@ -51,10 +65,31 @@ mega_drill.pinMode(pinDrill_3,mega_drill.OUTPUT)
 
 
 #######################################   DRILLS   ########################################################
+
+
+def fading_in_and_out(name,pin):
+    intensity = 0
+    fadeAmount = 5
+   # print ("Drill_") + [__name__] +("fading")
+    print ("Start fading in and")
+    for i in range (103):
+    # set the brightness of pin 9:
+        name.analogWrite(pin, intensity)
+    # change the brightness for next time through the loop:
+        intensity += fadeAmount
+    # reverse the direction of the fading at the ends of the fade: 
+        if intensity == 0 or intensity == 255:
+            fadeAmount = -fadeAmount         
+    # wait for 30 milliseconds to see the dimming effect 
+        sleep (0.03)
+
+        
+#go_on = 'arduino'.analogWrite(pinDrill_1, intensity)
 # FIRST DRILL ON
 def first_drill_prog():
     intensity = 0
     fadeAmount = 5
+    print ("Drill_1 fading")
     
     for i in range (103):
     # set the brightness of pin 9:
@@ -66,18 +101,7 @@ def first_drill_prog():
             fadeAmount = -fadeAmount         
     # wait for 30 milliseconds to see the dimming effect 
         sleep (0.03)
-'''
-def fading_in_and_out():
-    intensity = 0
-    fadeAmount = 5
 
-    for i in range (103):
-        drill.analogWrite(pinDrill,intensity)
-        intensity += fadeAmount
-        if intensity == 0 or intensity == 255
-            fadeAmount = - fadeAmount
-        sleep (0.03)
-'''        
                         
 # SECOND DRILL ON
 def second_drill_prog():
@@ -107,15 +131,15 @@ def third_drill_prog():
 #STOP DRILLS
 def stopDrill_1():
     mega_drill.analogWrite(pinDrill_1, 0)
-    print("Drill_1 stopped")
+    print("Drill_1 off")
 
 def stopDrill_2():
     mega_drill.analogWrite(pinDrill_2,0)
-    print("Drill_2 stopped")
+    print("Drill_2 off")
 
 def stopDrill_3():
     mega_drill.analogWrite(pinDrill_3,0)
-    print("Drill_3 stopped")
+    print("Drill_3 off")
 
 
 #####################################    MUSIC    ##################################################
@@ -134,18 +158,21 @@ def stopMusic():
 #################################### NEON LIGHTS ###############################################
 
 def all_on_neon():
+    print ("Neon_A all on")
     uno_light_A.digitalWrite(neon_A_1, 1)
     uno_light_A.digitalWrite(neon_A_2, 1)
     uno_light_A.digitalWrite(neon_A_3, 1)
     uno_light_A.digitalWrite(neon_A_4, 1)
 
 def all_off_neon():
+    print ("Neon_A all off")
     uno_light_A.digitalWrite(neon_A_1, 0)
     uno_light_A.digitalWrite(neon_A_2, 0)
     uno_light_A.digitalWrite(neon_A_3, 0)
     uno_light_A.digitalWrite(neon_A_4, 0)
     
 def tralalou ():
+    print ("Tralalou is running")
     uno_light_A.digitalWrite(neon_A_1, 1)
     sleep(0.05)
     uno_light_A.digitalWrite(neon_A_2, 1)
@@ -165,6 +192,7 @@ def tralalou ():
     sleep(0.05)
 
 def random_neon():
+    print ("Random Neon running")
     for i in range(8):
 #uno_light_A.digitalWrite(neon_A_2, (i + 1) % 2)
         uno_light_A.digitalWrite(neon_A_1, 1)
@@ -209,6 +237,14 @@ third_drill_thread = threading.Thread (target=third_drill_prog)
 
 
 startMusic()                        # STARTING MUSIC
+sleep (1)
+i=0
+while i<2:
+    fading_in_and_out(mega_drill,pinDrill_1)
+    fading_in_and_out(mega_drill,pinDrill_2)
+    fading_in_and_out(mega_drill,pinDrill_3)
+    i=i+1
+
 sleep (2)
 
 for i in range (3) :                #STARTING FIRST DRILL
@@ -218,6 +254,7 @@ for i in range (3) :                #STARTING FIRST DRILL
 #second_drill_prog()
 #third_drill_prog()
 
+sleep (1)
 all_on_neon()
 sleep(3)
 all_off_neon()
