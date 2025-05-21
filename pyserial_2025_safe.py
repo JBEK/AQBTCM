@@ -7,14 +7,21 @@ from pygame import mixer
 import time
 from time import sleep
 import os
-import random
-import json
 
 # ---------------- LUMINAIRES ------------------
 luminaires = {
-    "A": {"WW": {"A1": 2, "A2": 3, "A3": 4, "A4": 5}, "CW": {"A_COOL": 6}},
-    "B": {"WW": {"B1": 7, "B2": 8, "B3": 9, "B4": 10}, "CW": {"B_COOL": 11}},
-    "C": {"WW": {"C1": 12, "C2": 13, "C3": 44, "C4": 45}, "CW": {"C_COOL": 46}}
+    "A": {
+        "WW": {"A1": 2, "A2": 3, "A3": 4, "A4": 5},
+        "CW": {"A_COOL": 6}
+    },
+    "B": {
+        "WW": {"B1": 7, "B2": 8, "B3": 9, "B4": 10},
+        "CW": {"B_COOL": 11}
+    },
+    "C": {
+        "WW": {"C1": 12, "C2": 13, "C3": 44, "C4": 45},
+        "CW": {"C_COOL": 46}
+    }
 }
 
 # ---------------- PERCEUSES (UNO) ------------------
@@ -95,16 +102,16 @@ def set_pwm_uno(pin, value):
 # ---------------- TEST WW ------------------
 def test_ww_sequence():
     print("Début du test des WW (séquentiel avec fade)")
-    for _ in range(2):
+    for _ in range(2):  # Deux cycles
         for groupe in ["A", "B", "C"]:
             print(f"→ Test WW groupe {groupe}")
             pins = luminaires[groupe]["WW"].values()
-            for level in range(0, 256, 32):
+            for level in range(0, 256, 32):  # Fade-in
                 for pin in pins:
                     set_pwm(pin, level)
                 sleep(0.05)
             sleep(0.2)
-            for level in reversed(range(0, 256, 32)):
+            for level in reversed(range(0, 256, 32)):  # Fade-out
                 for pin in pins:
                     set_pwm(pin, level)
                 sleep(0.05)
@@ -116,85 +123,30 @@ def test_perceuses():
     print("Test des perceuses (UNO)")
     for name, pin in perceuses.items():
         print(f"→ Test {name}")
-        for level in range(0, 256, 32):
+        for level in range(0, 256, 32):  # Fade-in
             set_pwm_uno(pin, level)
             sleep(0.05)
         sleep(0.3)
-        for level in reversed(range(0, 256, 32)):
+        for level in reversed(range(0, 256, 32)):  # Fade-out
             set_pwm_uno(pin, level)
             sleep(0.05)
         sleep(0.4)
     print("Fin du test perceuses")
 
-# ---------------- MORSE LIGHT FROM FILE - VERSION JSON ------------------
-def charger_phrases(filepath="phrases.txt"):
-    phrases = []
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                if line.count("*") == 2:
-                    debut = line.index("*")
-                    fin = line.index("*", debut + 1)
-                    mot_choeur = line[debut+1:fin]
-                    phrase = line[:debut] + mot_choeur + line[fin+1:]
-                    phrases.append((phrase, mot_choeur))
-                else:
-                    phrases.append((line, None))
-        return phrases
-    except Exception as e:
-        print(f"Erreur lecture fichier : {e}")
-        return []
-
-def envoyer_commande_json(role, mode, text):
-    if not mega_light_1 or not mega_light_1.is_open:
-        print("Erreur : Arduino MEGA LIGHTS non connecté")
-        return
-    cmd = {
-        "role": role,
-        "mode": mode,
-        "text": text
-    }
-    json_str = json.dumps(cmd) + "\n"
-    mega_light_1.write(json_str.encode('utf-8'))
-    print(f"Envoyé JSON: {json_str.strip()}")
-
-def play_phrase_morse():
-    phrases = charger_phrases()
-    if not phrases:
-        messagebox.showerror("Erreur", "Aucune phrase chargée depuis phrases.txt")
-        return
-
-    groupes = ["A", "B", "C"]
-    for i, (texte, mot_choeur) in enumerate(phrases):
-        soliste = groupes[i % 3]
-        choeurs = [g for g in groupes if g != soliste]
-
-        print(f"\nPhrase: {texte} — Soliste: {soliste} — Chœurs: {choeurs}")
-
-        # Envoi soliste (phrase entière en mode "soliste")
-        envoyer_commande_json(soliste, "soliste", texte)
-
-        # Estimer durée lettre par lettre (~0.5s par lettre)
-        duree_soliste = max(len(texte) * 0.5, 2)
-        sleep(duree_soliste)
-
-        # Envoi choeurs (fade sur mot choeur)
-        if mot_choeur:
-            for groupe in choeurs:
-                envoyer_commande_json(groupe, "choeur", mot_choeur)
-            sleep(3)  # durée fade, ajustable selon Arduino
-
 # ---------------- UI ------------------
 root = tk.Tk()
 root.title("Contrôle Arduino")
 
-tk.Button(root, text="Connection aux Arduino", command=arduino_connexion).pack(padx=20, pady=20)
-tk.Button(root, text="Test Music", command=music_test).pack(padx=20, pady=(5, 20))
-tk.Button(root, text="Test WW (A → B → C)", command=test_ww_sequence).pack(padx=20, pady=(5, 20))
-tk.Button(root, text="Test Perceuses", command=test_perceuses).pack(padx=20, pady=(5, 20))
-tk.Button(root, text="Test Morse Lumière", command=play_phrase_morse).pack(padx=20, pady=(5, 20))
+btn_lancer = tk.Button(root, text="Connection aux Arduino", command=arduino_connexion)
+btn_lancer.pack(padx=20, pady=20)
+
+btn_test_music = tk.Button(root, text="Test Music", command=music_test)
+btn_test_music.pack(padx=20, pady=(5, 20))
+
+btn_test_ww = tk.Button(root, text="Test WW (A → B → C)", command=test_ww_sequence)
+btn_test_ww.pack(padx=20, pady=(5, 20))
+
+btn_test_drills = tk.Button(root, text="Test Perceuses", command=test_perceuses)
+btn_test_drills.pack(padx=20, pady=(5, 20))
 
 root.mainloop()
