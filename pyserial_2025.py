@@ -239,22 +239,25 @@ def envoyer_phrases_origines(soliste="A", fichier="test.txt"):
 
 # ---------------- ROUTINE ------------------
 def routine():
-    stop_flag.clear()  # Reset au démarrage
+    stop_flag.clear()
     print("Routine lancée.")
     smoke_on()
     music_start(filename="all_new_aqbtcm.mp3", volume=0.8)
-    sleep (3)
-    test_ww_sequence()
-    sleep (2)
-    test_perceuses()
+    sleep(3)
 
-    # Exemple de boucle que tu vas vouloir interrompre
+    # Lancer les séquences en parallèle
+    t1 = threading.Thread(target=test_ww_sequence)
+    t2 = threading.Thread(target=test_perceuses)
+    t1.start()
+    t2.start()
+
+    # Ensuite tu continues ta propre boucle de routine
     for i in range(20):
         if stop_flag.is_set():
             print("Routine interrompue par l'utilisateur.")
             break
         print(f"Étape {i+1}/20")
-        time.sleep(1)  # Remplace par ton vrai code étape par étape
+        sleep(1)
 
     music_stop()
     print("Fin de routine.")
