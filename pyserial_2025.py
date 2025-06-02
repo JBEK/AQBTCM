@@ -6,6 +6,7 @@ from pygame import mixer
 import time
 from time import sleep
 import os
+import random
 import re
 import threading
 
@@ -281,7 +282,7 @@ def attendre_ok(timeout_seconds=145): # Augmentation du timeout par défaut
     print(f"Timeout ({timeout_seconds}s) : OK non reçu de l'Arduino MEGA.")
     return False
 
-def envoyer_phrases_origines(soliste="A", fichier="hesiode.txt"):
+def envoyer_phrases_origines(fichier="hesiode.txt"):
     global mega_light_1
     if not mega_light_1 or not mega_light_1.is_open:
         print("Arduino MEGA LIGHTS non connecté, impossible d'envoyer les phrases.")
@@ -305,6 +306,9 @@ def envoyer_phrases_origines(soliste="A", fichier="hesiode.txt"):
         
     print(f"{len(phrases)} blocs de phrases (séparés par des points) extraits du fichier '{fichier}'.")
     
+    groupes_solistes_possibles = ["A", "B", "C"]
+    soliste_precedent = None
+
     for i, phrase in enumerate(phrases):
         if stop_flag.is_set():
             print("Envoi des phrases interrompu par stop_flag.")
@@ -326,7 +330,16 @@ def envoyer_phrases_origines(soliste="A", fichier="hesiode.txt"):
             print(f"Phrase {i+1} vide, ignorée.")
             continue
 
-        cmd = f"M:{soliste}|{phrase_nettoyee}|*{mot_choeur}*\n"
+        # Choisir un nouveau soliste différent du précédent
+        choix_solistes_actuels = [s for s in groupes_solistes_possibles if s != soliste_precedent]
+        if not choix_solistes_actuels: # Au cas où il n'y aurait qu'un soliste possible (ne devrait pas arriver avec 3)
+            choix_solistes_actuels = groupes_solistes_possibles
+        
+        soliste_actuel = random.choice(choix_solistes_actuels)
+        soliste_precedent = soliste_actuel
+        print(f"  Soliste pour cette phrase: {soliste_actuel}")
+
+        cmd = f"M:{soliste_actuel}|{phrase_nettoyee}|*{mot_choeur}*\n"
         
         try:
             mega_light_1.write(cmd.encode('utf-8'))
@@ -573,7 +586,7 @@ def run_test_in_thread(target_function, *args):
 # ---------------- UI HELVETICA ÉPURÉ ------------------
 root = tk.Tk()
 root.title("Contrôle Installation AQBTCM")
-root.geometry("450x550") # Un peu plus grand pour les boutons
+root.geometry("450x580") # Un peu plus grand pour les boutons et le nouveau bouton
 root.configure(bg="#f0f0f0")
 
 # Polices (vérifiez si elles sont installées sur votre système)
@@ -634,7 +647,7 @@ btn_smoke = tk.Button(frame, text="Test Fumée (5s)", command=lambda: smoke_out_
 style_button(btn_smoke)
 btn_smoke.pack(fill="x", pady=(0, 5))
 
-btn_phrases = tk.Button(frame, text="Envoyer Phrases (Morse)", command=lambda: run_test_in_thread(envoyer_phrases_origines, "A", "hesiode.txt")) # Exemple avec soliste A et test.txt
+btn_phrases = tk.Button(frame, text="Envoyer Phrases (Morse - Soliste Aléatoire)", command=lambda: run_test_in_thread(envoyer_phrases_origines, "hesiode.txt"))
 style_button(btn_phrases)
 btn_phrases.pack(fill="x", pady=(0, 5))
 
