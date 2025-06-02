@@ -105,7 +105,7 @@ def set_pwm_uno(pin, value):
     else:
         print("Erreur : Arduino UNO DRILL non connecté")
 
-# ---------------- TEST WW ------------------
+# ---------------- LIGHTS ------------------
 def test_ww_sequence():
     print("Début du test des WW (séquentiel avec fade)")
     for _ in range(2):  # Deux cycles
@@ -133,7 +133,7 @@ def test_ww_sequence():
             sleep(0.1)
     print("Fin du test WW")
 
-# ---------------- TEST PERCEUSES ------------------
+# ---------------- DRILLS ------------------
 def test_perceuses():
     print("Test des perceuses (UNO)")
     for name, pin in perceuses.items():
@@ -157,9 +157,14 @@ def test_perceuses():
         sleep(0.4)
     print("Fin du test perceuses")
 
+def all_drills_on(vitesse=200):
+    for pin in [3, 5, 6]:
+        set_pwm_uno(pin, vitesse)
 
+def all_drills_on_thread(vitesse=200):
+    threading.Thread(target=all_drills_on, args=(vitesse,), daemon=True).start()
 
-# ---------------- TEST FUMEE ------------------
+# ---------------- SMOKE ------------------
 
 def smoke_on():
     print("Allumage machine à fumée (UNO - Digital Relay)")
@@ -232,24 +237,36 @@ def envoyer_phrases_origines(soliste="A", fichier="test.txt"):
 
     print("Fin de l'envoi des phrases.")
 
+# ---------------- HEART ------------------
+def heart_play():
+    with open("heart.txt", "r") as f:
+        for line in f:
+            value = line.strip()
+            if value.isdigit():
+                mega_light_1.write(f"{value}\n".encode())
+                time.sleep(0.02)  # 10 ms entre chaque valeur ≈ 100 Hz
 # ---------------- ROUTINE ------------------
 def routine():
-    stop_flag.clear()  # Reset au démarrage
+    stop_flag.clear()
     print("Routine lancée.")
     smoke_on()
     music_start(filename="all_new_aqbtcm.mp3", volume=0.8)
-    sleep (3)
-    test_ww_sequence()
-    sleep (5)
-    test_perceuses()
+    sleep(3)
 
-    # Exemple de boucle que tu vas vouloir interrompre
+    # Lancer les séquences en parallèle
+    t1 = threading.Thread(target=test_ww_sequence)
+    t2 = threading.Thread(target=test_perceuses)
+    t1.start()
+    sleep (3)
+    t2.start()
+
+    # Ensuite tu continues ta propre boucle de routine
     for i in range(20):
         if stop_flag.is_set():
             print("Routine interrompue par l'utilisateur.")
             break
         print(f"Étape {i+1}/20")
-        time.sleep(1)  # Remplace par ton vrai code étape par étape
+        sleep(1)
 
     music_stop()
     print("Fin de routine.")
@@ -262,6 +279,43 @@ def interrompre_routine():
     music_stop()
     print("Signal d'interruption envoyé.")
     messagebox.showinfo("Info", "Routine interrompue.")
+
+def arret_urgence():
+    print("⚠️ ARRÊT D'URGENCE INITIÉ ⚠️")
+    stop_flag.set()
+
+    # Stop musique immédiatement
+    if mixer.get_init():
+        mixer.music.stop()
+        print("⏹ Musique arrêtée brutalement")
+
+    # Couper la fumée
+    if uno_drill and uno_drill.is_open:
+        try:
+            uno_drill.write(b"FUM_OFF\n")
+            print("💨 Fumée désactivée")
+        except Exception as e:
+            print(f"Erreur arrêt fumée : {e}")
+
+    # Éteindre toutes les lumières
+    for groupe in luminaires.values():
+        for sous_groupe in groupe.values():
+            for pin in sous_groupe.values():
+                try:
+                    set_pwm(pin, 0)
+                except Exception as e:
+                    print(f"Erreur arrêt lumière pin {pin} : {e}")
+
+    # Éteindre toutes les perceuses
+    for pin in perceuses.values():
+        try:
+            set_pwm_uno(pin, 0)
+        except Exception as e:
+            print(f"Erreur arrêt perceuse pin {pin} : {e}")
+
+    print("🚨 Tous les systèmes ont été mis hors tension.")
+    messagebox.showwarning("Arrêt d'urgence", "Tous les systèmes sont arrêtés brutalement.")
+
 
 # ---------------- UI HELVETICA ÉPURÉ ------------------
 root = tk.Tk()
@@ -297,6 +351,10 @@ btn_test_drills = tk.Button(frame, text="Test Perceuses", command=test_perceuses
 style_button(btn_test_drills)
 btn_test_drills.pack(fill="x", pady=(0, 10))
 
+btn_all_on = tk.Button(frame, text="Allumer toutes les perceuses", command=lambda: all_drills_on_thread(200))
+style_button(btn_all_on)
+btn_all_on.pack(fill="x", pady=(0, 10))
+
 btn_test_fumee = tk.Button(frame, text="Test Fumée", command=smoke_on)
 style_button(btn_test_fumee)
 btn_test_fumee.pack(fill="x", pady=(0, 10))
@@ -305,6 +363,10 @@ btn_envoyer_phrases = tk.Button(frame, text="Envoyer Phrases", command=envoyer_p
 style_button(btn_envoyer_phrases)
 btn_envoyer_phrases.pack(fill="x", pady=(0, 10))
 
+btn_coeur = tk.Button(frame, text="Heart Test", command=heart_play)
+style_button(btn_coeur)
+btn_coeur.pack(fill="x", pady=(0, 10))
+
 btn_lancer_routine = tk.Button(frame, text="Lancer la routine", command=lancer_routine_thread)
 style_button(btn_lancer_routine, font=FONT_BOLD, bg="#ff9933", fg="#ffffff", border=2)
 btn_lancer_routine.pack(fill="x", pady=(20, 10))
@@ -312,5 +374,9 @@ btn_lancer_routine.pack(fill="x", pady=(20, 10))
 btn_interrompre_routine = tk.Button(frame, text="Interrompre la routine", command=interrompre_routine)
 style_button(btn_interrompre_routine, font=FONT_BOLD, bg="#cc3333", fg="#ffffff", border=2)
 btn_interrompre_routine.pack(fill="x", pady=(0, 10))
+
+btn_arret_urgence = tk.Button(frame, text="ARRÊT D'URGENCE", command=arret_urgence)
+style_button(btn_arret_urgence, font=FONT_BOLD, bg="#ff0000", fg="#ffffff", border=3)
+btn_arret_urgence.pack(fill="x", pady=(20, 10))
 
 root.mainloop()
