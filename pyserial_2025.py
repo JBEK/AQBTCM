@@ -303,20 +303,23 @@ def envoyer_phrases_origines(soliste="A", fichier="hesiode.txt"):
         print(f"Aucune phrase valide trouvée dans {fichier}.")
         return
         
-    print(f"{len(phrases)} phrases extraites du fichier '{fichier}'.")
+    print(f"{len(phrases)} blocs de phrases (séparés par des points) extraits du fichier '{fichier}'.")
     
     for i, phrase in enumerate(phrases):
         if stop_flag.is_set():
             print("Envoi des phrases interrompu par stop_flag.")
             return
+
+        # Remplacer les retours à la ligne internes à une "phrase" par des espaces
+        phrase_continue = phrase.replace('\n', ' ')
             
-        match = re.search(r'\*(.+?)\*', phrase)
+        match = re.search(r'\*(.+?)\*', phrase_continue)
         if match:
             mot_choeur = match.group(1)
-            phrase_nettoyee = phrase.replace(f"*{mot_choeur}*", mot_choeur).strip()
+            phrase_nettoyee = phrase_continue.replace(f"*{mot_choeur}*", mot_choeur).strip()
         else:
             mot_choeur = "" # Envoyer une chaîne vide si pas de mot pour le chœur
-            phrase_nettoyee = phrase.strip()
+            phrase_nettoyee = phrase_continue.strip()
         
         # S'assurer que la phrase n'est pas vide après nettoyage
         if not phrase_nettoyee and not mot_choeur:
@@ -333,9 +336,16 @@ def envoyer_phrases_origines(soliste="A", fichier="hesiode.txt"):
             # Peut-être tenter de se reconnecter ou arrêter
             return 
         
-        if not attendre_ok(): # Utilise le timeout par défaut de attendre_ok
-            print("Erreur critique : pas de réponse OK de l'Arduino après l'envoi d'une phrase. Arrêt de l'envoi.")
-            # Ici, vous pourriez vouloir arrêter toute la routine ou tenter une récupération
+        # Calculer un timeout dynamique basé sur la longueur de la phrase
+        # Estimation grossière : ~1.5 secondes par caractère pour le soliste + ~2s pour le choeur (plus lent)
+        # + une marge de sécurité.
+        estimated_time_soliste = len(phrase_nettoyee) * 1.5 
+        estimated_time_choeur = len(mot_choeur) * 2.0 
+        dynamic_timeout = int(max(estimated_time_soliste, estimated_time_choeur) + 30) # 30s de marge
+        print(f"  Timeout dynamique calculé pour cette phrase: {dynamic_timeout}s")
+
+        if not attendre_ok(timeout_seconds=dynamic_timeout):
+            print(f"Erreur critique : pas de réponse OK de l'Arduino après l'envoi d'une phrase (timeout: {dynamic_timeout}s). Arrêt de l'envoi.")
             return # Arrête d'envoyer d'autres phrases
 
     print("Fin de l'envoi de toutes les phrases.")
@@ -424,7 +434,7 @@ def routine():
     thread_ww = threading.Thread(target=test_ww_sequence)
     thread_drills = threading.Thread(target=test_perceuses)
     thread_heart = threading.Thread(target=heart_play, args=(15,)) # Heartbeat pendant 25 secondes
-    thread_phrases = threading.Thread(target=envoyer_phrases_origines, args=("B", "test.txt")) # Soliste B
+    thread_phrases = threading.Thread(target=envoyer_phrases_origines, args=("B", "hesiode.txt")) # Soliste B
 
     # Démarrage des threads
     print("Démarrage thread WW...")
@@ -624,7 +634,7 @@ btn_smoke = tk.Button(frame, text="Test Fumée (5s)", command=lambda: smoke_out_
 style_button(btn_smoke)
 btn_smoke.pack(fill="x", pady=(0, 5))
 
-btn_phrases = tk.Button(frame, text="Envoyer Phrases (Morse)", command=lambda: run_test_in_thread(envoyer_phrases_origines, "A", "test.txt")) # Exemple avec soliste A et test.txt
+btn_phrases = tk.Button(frame, text="Envoyer Phrases (Morse)", command=lambda: run_test_in_thread(envoyer_phrases_origines, "A", "hesiode.txt")) # Exemple avec soliste A et test.txt
 style_button(btn_phrases)
 btn_phrases.pack(fill="x", pady=(0, 5))
 

@@ -4,11 +4,21 @@
 void declamer(String solisteGroupe, String phraseRecue, String motChoeurRecue);
 void avancerMorseSoliste(const int* pins, const String& code, int& indexSignal, bool& ledAllume, unsigned long& timer);
 void avancerMorseChoeurs(const int* pins1, const int* pins2, const String& code, int& indexSignal, bool& ledAllume, unsigned long& timer);
+void resetAllModes(); 
 
-// Pins des groupes
+// Enum pour les modes de fonctionnement
+enum OpMode { NONE, MORSE, HEARTBEAT, MANUAL_PWM };
+OpMode currentOpMode = NONE;
+
+// Pins des groupes Warm White
 const int pinsA[] = {2, 3, 4, 5};
 const int pinsB[] = {7, 8, 9, 10};
 const int pinsC[] = {12, 13, 44, 45};
+
+// Pins Cool White (non utilisées par le morse ou le heartbeat, mais contrôlables par P:)
+const int pinA_COOL = 6;
+const int pinB_COOL = 11;
+const int pinC_COOL = 46;
 
 // Durées morse en ms
 const int dotDuration = 200;
@@ -24,7 +34,7 @@ String choeurMot = "";
 String choeurGroupes[2];
 
 bool morseEnCours = false;
-bool okEnvoye = false; // Nouveau flag pour envoyer "OK" une fois
+bool okEnvoye = true; // Initialisé à true dans setup
 
 // Variables soliste
 const int* solistePins = nullptr;
@@ -48,25 +58,6 @@ String serialBuffer = "";
 void setGroupPWM(const int* pins, int brightness) {
   for (int i = 0; i < 4; i++) {
     analogWrite(pins[i], brightness);
-  }
-}
-
-// Fonction pour appliquer PWM sur une seule broche, si elle est dans les groupes
-void setPinPWM(int pin, int brightness) {
-  // On vérifie si la broche fait partie des pins A, B ou C
-  bool found = false;
-  for (int i = 0; i < 4; i++) {
-    if (pinsA[i] == pin || pinsB[i] == pin || pinsC[i] == pin) {
-      found = true;
-      break;
-    }
-  }
-  if (found) {
-    analogWrite(pin, brightness);
-  } else {
-    // Broche non prise en charge, on peut ignorer ou envoyer un message
-    Serial.print("Pin non supportee: ");
-    Serial.println(pin);
   }
 }
 
@@ -133,7 +124,7 @@ String phraseToMorse(const String& texte) {
 
 // Avancer morse soliste (fade rapide)
 void avancerMorseSoliste(const int* pins, const String& code, int& indexSignal, bool& ledAllume, unsigned long& timer) {
-  if (code.length() == 0) return;
+  if (code.length() == 0 || pins == nullptr) return;
 
   unsigned long now = millis();
 
@@ -151,15 +142,16 @@ void avancerMorseSoliste(const int* pins, const String& code, int& indexSignal, 
       }
       timer = now;
       ledAllume = true;
-    } else if (c == ' ') {
-      if (now - timer >= interCharPause) {
+    } else if (c == ' ') { // Pause inter-caractère ou inter-mot
+      unsigned long pauseDuration = (code.charAt(indexSignal + 1) == ' ' || indexSignal + 1 >= code.length()) ? interWordPause : interCharPause;
+      if (now - timer >= pauseDuration) {
         indexSignal++;
         timer = now;
       }
-    } else {
+    } else { // Caractère inconnu, on avance
       indexSignal++;
     }
-  } else {
+  } else { // LED allumée
     unsigned long duree = (c == '.') ? dotDuration : dashDuration;
     if (now - timer >= duree) {
       for (int bri = 255; bri >= 0; bri -= 51) {
@@ -168,14 +160,14 @@ void avancerMorseSoliste(const int* pins, const String& code, int& indexSignal, 
       }
       ledAllume = false;
       indexSignal++;
-      timer = now;
+      timer = now; // Timer pour la pause intra-caractère
     }
   }
 }
 
 // Avancer morse choeurs (fade lent synchronisé)
 void avancerMorseChoeurs(const int* pins1, const int* pins2, const String& code, int& indexSignal, bool& ledAllume, unsigned long& timer) {
-  if (code.length() == 0) return;
+  if (code.length() == 0 || pins1 == nullptr || pins2 == nullptr) return;
 
   unsigned long now = millis();
 
@@ -194,15 +186,16 @@ void avancerMorseChoeurs(const int* pins1, const int* pins2, const String& code,
       }
       timer = now;
       ledAllume = true;
-    } else if (c == ' ') {
-      if (now - timer >= interCharPause * 2) {
+    } else if (c == ' ') { // Pause inter-caractère ou inter-mot
+      unsigned long pauseDuration = (code.charAt(indexSignal + 1) == ' ' || indexSignal + 1 >= code.length()) ? interWordPause * 2 : interCharPause * 2;
+      if (now - timer >= pauseDuration) {
         indexSignal++;
         timer = now;
       }
     } else {
       indexSignal++;
     }
-  } else {
+  } else { // LED allumée
     unsigned long duree = (c == '.') ? dotDuration * 3 : dashDuration * 3;
     if (now - timer >= duree) {
       for (int bri = 120; bri >= 20; bri -= 10) {
@@ -257,29 +250,56 @@ void declamer(String solisteGroupe, String phraseRecue, String motChoeurRecue) {
   indexSignalChoeur = 0;
   solisteLedAllume = false;
   choeurLedAllume = false;
+  solisteTimer = millis(); 
+  choeurTimer = millis();
   morseEnCours = true;
   okEnvoye = false;
 
+  // Éteindre tous les groupes au début d'une nouvelle déclamation
+  // resetAllModes() s'en chargera si appelé avant declamer()
+}
+
+// Fonction pour arrêter tous les modes actifs et éteindre les LEDs
+void resetAllModes() {
+  if (morseEnCours) {
+    morseEnCours = false;
+  }
+  // Éteint tous les groupes WW (utilisés par Morse et Heartbeat)
   setGroupPWM(pinsA, 0);
   setGroupPWM(pinsB, 0);
   setGroupPWM(pinsC, 0);
+  // Éteint les CW (utilisés par P:)
+  digitalWrite(pinA_COOL, LOW);
+  digitalWrite(pinB_COOL, LOW);
+  digitalWrite(pinC_COOL, LOW);
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  delay(1000); 
 
   for (int i = 0; i < 4; i++) {
     pinMode(pinsA[i], OUTPUT);
     pinMode(pinsB[i], OUTPUT);
     pinMode(pinsC[i], OUTPUT);
   }
+  pinMode(pinA_COOL, OUTPUT);
+  pinMode(pinB_COOL, OUTPUT);
+  pinMode(pinC_COOL, OUTPUT);
 
+  // Eteindre tout au démarrage
   setGroupPWM(pinsA, 0);
   setGroupPWM(pinsB, 0);
   setGroupPWM(pinsC, 0);
-
-  Serial.println("Prêt à recevoir commande morse...");
+  digitalWrite(pinA_COOL, LOW);
+  digitalWrite(pinB_COOL, LOW);
+  digitalWrite(pinC_COOL, LOW);
+  
+  currentOpMode = NONE; // Initialisation du mode
+  morseEnCours = false;
+  okEnvoye = true; // Initialement, aucun OK n'est attendu
+  
+  Serial.println("Prêt à recevoir commande...");
 }
 
 void loop() {
@@ -289,6 +309,8 @@ void loop() {
       serialBuffer.trim();
 
       if (serialBuffer.startsWith("M:")) {
+        resetAllModes(); // M interrompt toujours H, P, ou un M précédent.
+        currentOpMode = MORSE;
         int pos1 = serialBuffer.indexOf(':');
         int pos2 = serialBuffer.indexOf('|', pos1 + 1);
         int pos3 = serialBuffer.indexOf('|', pos2 + 1);
@@ -300,32 +322,64 @@ void loop() {
           String phraseRecue = serialBuffer.substring(pos2 + 1, pos3);
           String motChoeurRecue = serialBuffer.substring(posStar1 + 1, posStar2);
           declamer(solisteRecue, phraseRecue, motChoeurRecue);
+        } else {
+          Serial.println("ERR_FORMAT_M");
         }
-
-      } else if (serialBuffer.startsWith("P")) {
+      } else if (serialBuffer.startsWith("P")) { 
+        if (currentOpMode == MORSE || currentOpMode == HEARTBEAT) {
+            resetAllModes(); // P interrompt M ou H
+        }
+        currentOpMode = MANUAL_PWM;
         int sep = serialBuffer.indexOf(':');
-        if (sep > 0) {
+        if (sep > 0 && sep < serialBuffer.length() - 1) {
           int pin = serialBuffer.substring(1, sep).toInt();
           int val = serialBuffer.substring(sep + 1).toInt();
-          // Vérifier que la pin fait partie des pins A/B/C et val est valide
-          bool found = false;
+          val = constrain(val, 0, 255);
+
+          bool pin_is_managed = false;
           for (int i = 0; i < 4; i++) {
             if (pinsA[i] == pin || pinsB[i] == pin || pinsC[i] == pin) {
-              found = true;
+              pin_is_managed = true;
               break;
             }
           }
-          if (found && val >= 0 && val <= 255) {
+          if (!pin_is_managed) {
+            if (pin == pinA_COOL || pin == pinB_COOL || pin == pinC_COOL) {
+              pin_is_managed = true;
+            }
+          }
+
+          if (pin_is_managed) {
             analogWrite(pin, val);
             Serial.println("OK");
           } else {
-            Serial.println("ERR");
+            Serial.print("ERR_PIN_UNMANAGED:");
+            Serial.println(pin);
           }
+        } else {
+          Serial.println("ERR_FORMAT_P");
         }
+      } else if (serialBuffer.startsWith("H:")) {
+        if (currentOpMode != HEARTBEAT) { // H interrompt M ou P. Si déjà H, ne pas reseter pour éviter clignotement.
+            resetAllModes(); 
+        }
+        currentOpMode = HEARTBEAT;
+        int sep = serialBuffer.indexOf(':');
+        if (sep > 0 && sep < serialBuffer.length() - 1) {
+          int val = serialBuffer.substring(sep + 1).toInt();
+          val = constrain(val, 0, 255);
+          setGroupPWM(pinsA, val);
+          setGroupPWM(pinsB, val);
+          setGroupPWM(pinsC, val);
+        } else {
+          Serial.println("ERR_FORMAT_H");
+        }
+      } else {
+        Serial.print("ERR_UNKNOWN_CMD:");
+        Serial.println(serialBuffer);
       }
-
       serialBuffer = "";
-    } else {
+    } else if (serialBuffer.length() < 100) { 
       serialBuffer += c;
     }
   }
@@ -334,16 +388,18 @@ void loop() {
     avancerMorseSoliste(solistePins, solisteCode, indexSignalSoliste, solisteLedAllume, solisteTimer);
     avancerMorseChoeurs(choeurPins1, choeurPins2, choeurCode, indexSignalChoeur, choeurLedAllume, choeurTimer);
 
-    // Fin de lecture morse ?
-    if (indexSignalSoliste >= solisteCode.length() && indexSignalChoeur >= choeurCode.length()) {
+    bool solisteFini = (solisteCode.length() == 0 || indexSignalSoliste >= solisteCode.length());
+    bool choeurFini = (choeurCode.length() == 0 || indexSignalChoeur >= choeurCode.length());
+
+    if (solisteFini && choeurFini) {
       morseEnCours = false;
+      if (currentOpMode == MORSE) { // S'assurer que c'est bien la fin d'un mode Morse
+          currentOpMode = NONE; 
+      }
       if (!okEnvoye) {
         Serial.println("OK");
         okEnvoye = true;
       }
-      setGroupPWM(pinsA, 0);
-      setGroupPWM(pinsB, 0);
-      setGroupPWM(pinsC, 0);
     }
   }
 }
