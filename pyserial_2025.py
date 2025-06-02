@@ -354,7 +354,7 @@ def envoyer_phrases_origines(fichier="hesiode.txt"):
         # + une marge de sécurité.
         estimated_time_soliste = len(phrase_nettoyee) * 1.5 
         estimated_time_choeur = len(mot_choeur) * 2.0 
-        dynamic_timeout = int(max(estimated_time_soliste, estimated_time_choeur) + 30) # 30s de marge
+        dynamic_timeout = int(max(estimated_time_soliste, estimated_time_choeur) + 400) # 30s de marge
         print(f"  Timeout dynamique calculé pour cette phrase: {dynamic_timeout}s")
 
         if not attendre_ok(timeout_seconds=dynamic_timeout):
@@ -364,11 +364,24 @@ def envoyer_phrases_origines(fichier="hesiode.txt"):
     print("Fin de l'envoi de toutes les phrases.")
 
 # ---------------- HEART ------------------
-def heart_play(duration=10):
+def heart_play(duration=10, sound_file="beat.wav", sound_interval=0.8, max_sound_volume=0.7):
     global mega_light_1, stop_flag 
     if not mega_light_1 or not mega_light_1.is_open:
         print("Arduino MEGA LIGHTS non connecté, impossible d'envoyer les battements.")
         return
+
+    init_music() # S'assurer que le mixer est initialisé
+    heart_sound_obj = None
+    if os.path.exists(sound_file):
+        try:
+            heart_sound_obj = mixer.Sound(sound_file)
+            # Le volume sera réglé dynamiquement
+            print(f"Son de battement '{sound_file}' chargé.")
+        except pygame.error as e:
+            print(f"Erreur lors du chargement du son '{sound_file}': {e}")
+            heart_sound_obj = None
+    else:
+        print(f"Fichier son '{sound_file}' introuvable. Les battements seront silencieux.")
 
     start_time = time.time()
     try:
@@ -385,6 +398,7 @@ def heart_play(duration=10):
     idx = 0
     n = len(lines)
     consecutive_errors = 0
+    last_sound_play_time = 0
     max_consecutive_errors = 5 # Arrêter après 5 erreurs d'écriture consécutives
 
     print("Démarrage Heartbeat...")
@@ -393,12 +407,49 @@ def heart_play(duration=10):
             print("Heartbeat interrompu par stop_flag.")
             break
 
-        value_str = lines[idx].strip()
-        if value_str.isdigit():
-            value = int(value_str)
-            value = max(0, min(255, value)) # S'assurer que la valeur est dans la plage PWM
+        current_intensity_str = lines[idx].strip()
+        current_intensity = 0 # Valeur par défaut si non numérique
+        if current_intensity_str.isdigit():
+            current_intensity = int(current_intensity_str)
+            current_intensity = max(0, min(255, current_intensity)) # S'assurer que la valeur est dans la plage 0-255
+        else:
+            # Gérer le cas où la ligne n'est pas un nombre, par exemple en l'ignorant ou en utilisant une valeur par défaut.
+            print(f"Valeur non numérique ignorée dans heart.txt à la ligne {idx+1}: '{current_intensity_str}'")
+            # On pourrait décider de sauter cette itération ou d'utiliser current_intensity = 0
+
+        current_loop_time = time.time()
+        # Jouer le son de battement à intervalle régulier
+        if heart_sound_obj and (current_loop_time - last_sound_play_time >= sound_interval) and not stop_flag.is_set():
+            target_volume_for_beat = (current_intensity / 255.0) * max_sound_volume
             
-            cmd = f"H:{value}\n"
+            # Jouer le son et obtenir le canal spécifique pour ce son
+            channel = heart_sound_obj.play() 
+            
+            if channel: # S'assurer qu'un canal a bien été obtenu
+                # Appliquer un fade-in rapide sur ce canal spécifique
+                fade_in_start_volume = 0.0
+                channel.set_volume(fade_in_start_volume) # Commencer à volume 0 pour ce son spécifique
+
+                fade_in_duration_s = 0.10 # Augmenté à 100 ms pour le fade in
+                steps = 5 # Augmenté à 5 étapes pour le fade
+                delay_per_step_s = fade_in_duration_s / steps
+
+                for i_fade_step in range(1, steps + 1):
+                    if stop_flag.is_set():
+                        channel.stop() # Arrêter le son sur ce canal si interrompu
+                        break
+                    # Interpolation linéaire du volume
+                    current_fade_volume = fade_in_start_volume + (target_volume_for_beat - fade_in_start_volume) * (i_fade_step / float(steps))
+                    channel.set_volume(current_fade_volume)
+                    time.sleep(delay_per_step_s)
+                
+                # S'assurer que le volume final est bien le volume cible si non interrompu et que le fade a complété toutes ses étapes
+                if not stop_flag.is_set() and i_fade_step == steps: 
+                    channel.set_volume(target_volume_for_beat)
+            last_sound_play_time = current_loop_time
+
+        if current_intensity_str.isdigit(): # Envoyer la commande H: uniquement si la valeur était numérique
+            cmd = f"H:{current_intensity}\n"
             try:
                 bytes_written = mega_light_1.write(cmd.encode())
                 # print(f"[MEGA] Heartbeat: {cmd.strip()} ({bytes_written} bytes)") # Débogage
@@ -418,8 +469,6 @@ def heart_play(duration=10):
                     break
             
             time.sleep(0.02)  # Rythme d'envoi (environ 50Hz)
-        else:
-            print(f"Valeur non numérique ignorée dans heart.txt: {value_str}")
 
         idx = (idx + 1) % n # Boucle sur le fichier
     
@@ -429,7 +478,11 @@ def heart_play(duration=10):
     #    try:
     #        mega_light_1.write(b"H:0\n") 
     #    except Exception as e:
-    #        print(f"Erreur envoi H:0 à la fin de Heartbeat: {e}")
+    #        print(f"Erreur envoi H:0 à la fin de Heartbeat: {e}")    
+    if heart_sound_obj:
+        heart_sound_obj.stop() # S'assurer que le son est arrêté à la fin
+        print("Son de battement arrêté.")
+
     print("Fin Heartbeat.")
 
 # ---------------- ROUTINE ------------------
