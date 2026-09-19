@@ -70,7 +70,11 @@ UART2 partagé (TMC2209 ×3) : RX = D21, TX = D22.
 
 | Commande | Effet | Réponse |
 |---|---|---|
-| `M:<soliste>\|<phrase>\|*<motChoeur>*` | séquence morse — ex `M:A\|BONJOUR\|*JOUR*` : le groupe A épelle "BONJOUR" tube par tube, les 2 autres groupes fondent ensemble à chaque lettre du mot choeur | `OK` à la fin, ou `ERR_FORMAT_M` |
+| `M:<soliste>\|<phrase avec *mots* marqués>` | séquence morse — ex `M:B\|Les *Muses* dansent` : le groupe B (soliste) épelle toute la phrase. Quand il arrive sur un mot entre `*...*`, les 2 autres groupes (chœurs) se mettent à réciter ce mot **en boucle**, doucement, et **continuent pendant les phrases suivantes** jusqu'au prochain mot marqué (ils basculent alors dessus). Les `M:` enchaînés ne coupent pas les chœurs. Caractères reconnus : A-Z et 0-9 uniquement (le Pi retire les accents avant l'envoi). Ligne max 600 caractères. | `OK` quand le **soliste** a fini sa phrase (les chœurs continuent), ou `ERR_FORMAT_M` |
+| `M:<soliste>\|<phrase>\|*<motChoeur>*` | ancien format, toujours accepté — ex `M:A\|BONJOUR\|*JOUR*` : le chœur récite son mot dès le début de la phrase | idem |
+
+Réglages morse (durées, luminosités, fondus du soliste et des chœurs) : constantes en haut de `esp32_lights.ino`.
+Le firmware est entièrement non-bloquant (aucun `delay()` dans `loop()`) : le soliste n'est jamais figé par un fondu de chœur.
 
 ### Battement de cœur
 

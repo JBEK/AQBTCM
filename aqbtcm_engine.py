@@ -11,6 +11,7 @@ import os
 import re
 import threading
 import time
+import unicodedata
 
 import serial
 import serial.tools.list_ports
@@ -31,6 +32,13 @@ LUMINAIRES = {
 LUMINAIRES_CW = {"A": 12, "B": 13, "C": 14}
 GROUPES = ["A", "B", "C"]
 
+def sans_accents(texte):
+    """Le firmware ne connaît que A-Z et 0-9 : é -> e, œ -> oe, ç -> c..."""
+    texte = (texte.replace("œ", "oe").replace("Œ", "OE")
+                  .replace("æ", "ae").replace("Æ", "AE"))
+    return "".join(c for c in unicodedata.normalize("NFD", texte) if not unicodedata.combining(c))
+
+
 ID_LIGHTS = "AQBTCM_LIGHTS"
 ID_MOTORS = "AQBTCM_MOTORS"
 
@@ -38,6 +46,7 @@ ID_MOTORS = "AQBTCM_MOTORS"
 class Installation:
     def __init__(self, ecg_file="JFD_01.txt", music_file="all_new_aqbtcm.mp3"):
         self.stop_flag = threading.Event()
+        self._heartbeat_active = threading.Event()
 
         self.ser_lights = None
         self.ser_motors = None
@@ -56,8 +65,11 @@ class Installation:
 
         # réglages tunables de la routine (pas de "bonne" valeur imposée par
         # le matériel : à ajuster à l'œil / à l'oreille sur place)
-        self.heartbeat_interval_s = 45
-        self.heartbeat_duration_s = 15
+        self.heartbeat_every_n_phrases = 10
+        self.heartbeat_duration_s = 30          # durée du battement (son + lumière)
+        self.heartbeat_music_fade_s = 4         # descente / remontée de la musique autour du battement
+        self.heartbeat_silence_after_s = 3      # noir et silence entre la fin du battement et la reprise
+        self.music_volume = 0.6
         self.smoke_pulse_ms = 300
         self.smoke_period_ms = 4000
 
@@ -78,7 +90,7 @@ class Installation:
             time.sleep(2)  # laisse l'ESP32 finir son reset après ouverture du port
             try:
                 ser.reset_input_buffer()
-                ser.write(b"ID?\n")
+                ser.write(b"\nID?\n")  # le \n vide un éventuel octet parasite à l'ouverture du port
                 time.sleep(0.3)
                 reply = ser.read(ser.in_waiting or 1).decode(errors="ignore").strip()
             except Exception as e:
@@ -187,24 +199,32 @@ class Installation:
         print("Fin test CW")
 
     # ==================== LUMIÈRES : MORSE ====================
-    def _attendre_ok(self, timeout=145):
+    def _attendre_ok(self, timeout):
+        """Attend la fin du morse d'une phrase. Retourne "ok", "erreur" (l'ESP
+        a refusé la commande), "interrompu" (battement de cœur en cours),
+        "stop" ou "timeout"."""
         if not self.ser_lights or not self.ser_lights.is_open:
-            return False
+            return "timeout"
         start = time.time()
         buffer = ""
         while time.time() - start < timeout:
             if self.stop_flag.is_set():
-                print("Attente OK interrompue")
-                return False
+                return "stop"
+            if self._heartbeat_active.is_set():
+                return "interrompu"
             if self.ser_lights.in_waiting > 0:
                 buffer += self.ser_lights.read(self.ser_lights.in_waiting).decode(errors="ignore")
+                if "ERR_FORMAT_M" in buffer:
+                    return "erreur"
                 if "OK" in buffer:
-                    return True
+                    return "ok"
             time.sleep(0.05)
-        print("Timeout attente OK de l'ESP32 LIGHTS")
-        return False
+        return "timeout"
 
-    def envoyer_phrases_origines(self, soliste="A", fichier="test.txt"):
+    def envoyer_phrases_origines(self, soliste="A", fichier="test.txt", battement_toutes_les=None):
+        """Lit le fichier phrase par phrase en morse. Si battement_toutes_les=N,
+        une séquence battement de cœur est jouée entre deux phrases, après
+        chaque groupe de N phrases (jamais au milieu d'une phrase)."""
         if not os.path.exists(fichier):
             print(f"Fichier {fichier} introuvable.")
             return
@@ -214,24 +234,44 @@ class Installation:
         phrases = [p.strip() for p in re.split(r"\.\s*", texte) if p.strip()]
         print(f"{len(phrases)} phrases extraites du fichier.")
 
-        for phrase in phrases:
+        i = 0
+        while i < len(phrases):
             if self.stop_flag.is_set():
                 print("Envoi phrases interrompu")
                 return
-            match = re.search(r"\*(.+?)\*", phrase)
-            if match:
-                mot_choeur = match.group(1)
-                phrase_nettoyee = phrase.replace(f"*{mot_choeur}*", mot_choeur)
-            else:
-                mot_choeur = ""
-                phrase_nettoyee = phrase
+            # un battement de cœur est en cours : on attend sa fin avant de (re)lire
+            while self._heartbeat_active.is_set() and not self.stop_flag.is_set():
+                time.sleep(0.1)
 
-            cmd = f"M:{soliste}|{phrase_nettoyee}|*{mot_choeur}*"
+            # les *mots marqués* restent dans la phrase : le firmware sait ainsi
+            # à quel moment de la lecture les chœurs doivent les reprendre
+            # un retour à la ligne interne couperait la commande en deux côté ESP
+            phrase = " ".join(sans_accents(phrases[i]).split())
+            phrase_nettoyee = phrase.replace("*", "")
+
+            cmd = f"M:{soliste}|{phrase}"
+            if self.ser_lights and self.ser_lights.is_open:
+                with self._lock_lights:
+                    self.ser_lights.reset_input_buffer()  # purge les anciens "OK" (ex: commandes P)
             self._send_lights(cmd)
-            print(f"Envoyé: {cmd}")
+            print(f"Envoyé ({i + 1}/{len(phrases)}): {phrase_nettoyee[:60]}")
 
-            if not self._attendre_ok():
-                print("Pas de réponse OK, arrêt de l'envoi.")
+            # le morse dure environ 1.5 s par caractère : large marge avant de conclure à un blocage
+            resultat = self._attendre_ok(timeout=60 + 3 * len(phrase_nettoyee))
+            if resultat == "ok":
+                i += 1
+                if battement_toutes_les and i % battement_toutes_les == 0 and i < len(phrases):
+                    self.run_heartbeat_sequence()
+            elif resultat == "interrompu":
+                print("Lecture interrompue par le battement de cœur, la phrase sera relue.")
+            elif resultat == "erreur":
+                print(f"L'ESP32 LIGHTS a refusé la phrase {i + 1}, on passe à la suivante.")
+                i += 1
+            elif resultat == "stop":
+                print("Envoi phrases interrompu")
+                return
+            else:
+                print("Pas de réponse OK de l'ESP32 LIGHTS, arrêt de l'envoi.")
                 break
 
         print("Fin de l'envoi des phrases.")
@@ -309,10 +349,24 @@ class Installation:
             print(f"Fichier audio manquant: {self.music_file}")
             return
         self.init_music()
+        self.music_volume = volume
         mixer.music.load(self.music_file)
         mixer.music.set_volume(volume)
         mixer.music.play()
         print("Musique lancée")
+
+    def _fondu_musique(self, volume_cible, duree_s):
+        """Fait glisser le volume de la musique vers volume_cible en duree_s
+        secondes (interruptible par stop_flag)."""
+        if not mixer.get_init():
+            return
+        depart = mixer.music.get_volume()
+        pas = max(1, int(duree_s * 20))
+        for k in range(1, pas + 1):
+            if self.stop_flag.is_set():
+                return
+            mixer.music.set_volume(depart + (volume_cible - depart) * k / pas)
+            time.sleep(duree_s / pas)
 
     def music_stop(self, fade_ms=3333):
         if mixer.get_init():
@@ -321,26 +375,55 @@ class Installation:
 
     # ==================== BATTEMENT DE CŒUR ====================
     def run_heartbeat_sequence(self, duration_s=None, update_hz=25):
-        """Interrompt/suspend les 2 ESP32 en même temps, joue le son en live
-        (HeartbeatSonifier) et anime les lumières en phase avec lui."""
+        """Interruption battement de cœur :
+        1. les perceuses s'arrêtent et les lumières s'éteignent (fin de la lecture morse)
+        2. la musique descend jusqu'au silence
+        3. le cœur bat, en son (HeartbeatSonifier) et en lumière, pendant duration_s
+        4. tout s'éteint, un temps de noir et de silence
+        5. les perceuses repartent, la musique remonte, et l'appelant reprend la lecture
+        """
         duration_s = self.heartbeat_duration_s if duration_s is None else duration_s
         print("Début séquence battement de cœur")
 
-        self._send_motors("H:START")
-        self._send_lights("H:START")
-        self.sonifier.start()
+        musique_jouait = mixer.get_init() and mixer.music.get_busy()
+        volume_musique = self.music_volume
+
+        self._heartbeat_active.set()
         try:
-            start = time.time()
-            while time.time() - start < duration_s:
-                if self.stop_flag.is_set():
-                    break
-                env = self.sonifier.get_current_envelope()
-                self._send_lights(f"H:{int(env * 255)}")
-                time.sleep(1 / update_hz)
+            self._send_motors("H:START")
+            self._send_lights("H:0")  # entre en mode battement, tout noir : coupe morse et chœurs
+
+            if musique_jouait:
+                self._fondu_musique(0.0, self.heartbeat_music_fade_s)
+                mixer.music.pause()
+
+            if not self.stop_flag.is_set():
+                self.sonifier.start()
+                start = time.time()
+                while time.time() - start < duration_s:
+                    if self.stop_flag.is_set():
+                        break
+                    env = self.sonifier.get_current_envelope()
+                    self._send_lights(f"H:{int(env * 255)}")
+                    time.sleep(1 / update_hz)
+                self.sonifier.stop()
+
+            self._send_lights("H:STOP")  # tout s'éteint
+            if not self.stop_flag.is_set():
+                self.stop_flag.wait(self.heartbeat_silence_after_s)
         finally:
-            self.sonifier.stop()
+            self.sonifier.stop(fade_ms=0)
             self._send_lights("H:STOP")
             self._send_motors("H:STOP")
+            if musique_jouait and not self.stop_flag.is_set():
+                # la musique remonte en tâche de fond, pendant que la lecture reprend
+                mixer.music.unpause()
+                threading.Thread(
+                    target=self._fondu_musique,
+                    args=(volume_musique, self.heartbeat_music_fade_s),
+                    daemon=True,
+                ).start()
+            self._heartbeat_active.clear()
         print("Fin séquence battement de cœur")
 
     def run_heartbeat_sequence_thread(self, duration_s=None):
@@ -371,17 +454,14 @@ class Installation:
         time.sleep(3)
 
         t_phrases = threading.Thread(
-            target=self.envoyer_phrases_origines, args=("B", "hesiode.txt")
+            target=self.envoyer_phrases_origines,
+            args=("B", "hesiode.txt", self.heartbeat_every_n_phrases),
         )
         t_phrases.start()
 
-        derniere_pulsation = time.time()
         while t_phrases.is_alive():
             if self.stop_flag.is_set():
                 break
-            if time.time() - derniere_pulsation >= self.heartbeat_interval_s:
-                self.run_heartbeat_sequence()
-                derniere_pulsation = time.time()
             time.sleep(0.5)
 
         self.smoke_stop()

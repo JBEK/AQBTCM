@@ -1,7 +1,14 @@
 // ESP32_LIGHTS — bandeaux LED (PCA9685 + MOSFETs) + machine à fumée.
-// Remplace mega_light_pyserial.ino : même logique morse (machine à états
-// non-bloquante millis()), mais pilote un PCA9685 au lieu d'analogWrite
-// direct. Reprend FUM_ON/FUM_OFF de l'ancien firmware Uno.
+//
+// Morse soliste + chœurs, entièrement NON-BLOQUANT : aucun delay() dans
+// loop(). Les fondus sont calculés à partir de millis() à chaque tour, donc
+// le port série est lu en continu et le soliste n'est jamais figé par un
+// fondu de chœur.
+//
+// Chœurs : le soliste épelle toute la phrase. Quand il arrive sur un mot
+// marqué *comme ça*, les deux autres luminaires se mettent à réciter ce mot
+// en boucle, doucement, et continuent PENDANT LES PHRASES SUIVANTES jusqu'à
+// ce qu'un nouveau mot marqué arrive (ils basculent alors sur ce mot).
 
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
@@ -27,33 +34,134 @@ const uint8_t channelsCW[] = {12, 13, 14};  // CW luminaire 1, 2, 3
 enum OpMode { NONE, MORSE, HEARTBEAT, MANUAL_PWM };
 OpMode currentOpMode = NONE;
 
-// Durées morse en ms
-const int dotDuration = 200;
-const int dashDuration = 600;
-const int intraCharPause = 200;
-const int interCharPause = 600;
-const int interWordPause = 1400;
+// ---- Réglages morse (ms, luminosité 0-255) ----
+// Soliste : fondu rapide, plein régime.
+const int SOLISTE_LO = 0;
+const int SOLISTE_HI = 255;
+const int SOLISTE_FADE_MS = 90;
+const unsigned long SOLISTE_DOT_MS = 200;
+const unsigned long SOLISTE_DASH_MS = 600;
+const unsigned long SOLISTE_CHAR_PAUSE_MS = 600;
+const unsigned long SOLISTE_WORD_PAUSE_MS = 1400;
 
-String soliste = "";
-String phrase = "";
-String choeurMot = "";
-String choeurGroupes[2];
+// Chœurs : fondu lent, lumière douce (jamais au maximum), récitent en boucle.
+const int CHOEUR_LO = 20;
+const int CHOEUR_HI = 120;
+const int CHOEUR_FADE_MS = 550;
+const unsigned long CHOEUR_DOT_MS = 600;
+const unsigned long CHOEUR_DASH_MS = 1800;
+const unsigned long CHOEUR_CHAR_PAUSE_MS = 1200;
+const unsigned long CHOEUR_WORD_PAUSE_MS = 2800;
 
-bool morseEnCours = false;
-bool okEnvoye = true;
+// ---- Une "voix" morse : machine à états à base de millis() ----
+enum VoicePhase { V_IDLE, V_SYMBOL, V_PAUSE, V_DONE };
+
+struct MorseVoice {
+  String code;               // ex ".- -... " : chaque lettre suivie d'un espace
+  int index;
+  VoicePhase phase;
+  unsigned long phaseStart;
+  unsigned long phaseDur;
+  int level;                 // luminosité courante, recalculée à chaque tour
+  int lo, hi, fadeMs;
+  unsigned long dotMs, dashMs, charPauseMs, wordPauseMs;
+  bool loop;                 // le chœur reboucle sur son mot
+};
+
+void voiceConfig(MorseVoice& v, int lo, int hi, int fadeMs,
+                 unsigned long dot, unsigned long dash,
+                 unsigned long charPause, unsigned long wordPause, bool loop) {
+  v.lo = lo; v.hi = hi; v.fadeMs = fadeMs;
+  v.dotMs = dot; v.dashMs = dash;
+  v.charPauseMs = charPause; v.wordPauseMs = wordPause;
+  v.loop = loop;
+  v.code = "";
+  v.index = 0;
+  v.phase = V_DONE;
+  v.level = lo;
+}
+
+void voiceStart(MorseVoice& v, const String& code) {
+  v.code = code;
+  v.index = 0;
+  v.phase = V_IDLE;
+  v.level = v.lo;
+}
+
+void voiceUpdate(MorseVoice& v, unsigned long now) {
+  int len = v.code.length();
+
+  // Choisit l'élément suivant (symbole ou pause). Le garde-fou évite de
+  // tourner à vide si le code ne contient rien d'exploitable.
+  for (int guard = 0; v.phase == V_IDLE && guard < 8; guard++) {
+    if (v.index >= len) {
+      if (v.loop && len > 0) { v.index = 0; continue; }
+      v.phase = V_DONE;
+      break;
+    }
+    char c = v.code.charAt(v.index);
+    if (c == '.' || c == '-') {
+      v.phase = V_SYMBOL;
+      v.phaseStart = now;
+      v.phaseDur = (c == '.') ? v.dotMs : v.dashMs;
+    } else if (c == ' ') {
+      bool finDeMot = (v.index + 1 >= len) || v.code.charAt(v.index + 1) == ' ';
+      v.phase = V_PAUSE;
+      v.phaseStart = now;
+      v.phaseDur = finDeMot ? v.wordPauseMs : v.charPauseMs;
+    } else {
+      v.index++;
+    }
+  }
+
+  if (v.phase == V_SYMBOL) {
+    unsigned long t = now - v.phaseStart;
+    if (t >= v.phaseDur + (unsigned long)v.fadeMs) {
+      v.phase = V_IDLE;
+      v.index++;
+      v.level = v.lo;
+    } else if (t < (unsigned long)v.fadeMs) {
+      v.level = v.lo + (int)((long)(v.hi - v.lo) * (long)t / v.fadeMs);       // fondu entrant
+    } else if (t < v.phaseDur) {
+      v.level = v.hi;                                                          // plein
+    } else {
+      v.level = v.hi - (int)((long)(v.hi - v.lo) * (long)(t - v.phaseDur) / v.fadeMs);  // fondu sortant
+    }
+  } else if (v.phase == V_PAUSE) {
+    v.level = v.lo;
+    if (now - v.phaseStart >= v.phaseDur) {
+      v.phase = V_IDLE;
+      v.index++;
+    }
+  } else {
+    v.level = v.lo;
+  }
+}
+
+// ---- État de la déclamation ----
+MorseVoice soliste;
+MorseVoice choeur;
 
 const uint8_t* solistePins = nullptr;
-String solisteCode = "";
-int indexSignalSoliste = 0;
-bool solisteLedAllume = false;
-unsigned long solisteTimer = 0;
-
 const uint8_t* choeurPins1 = nullptr;
 const uint8_t* choeurPins2 = nullptr;
-String choeurCode = "";
-int indexSignalChoeur = 0;
-bool choeurLedAllume = false;
-unsigned long choeurTimer = 0;
+
+bool solisteEnCours = false;   // une phrase est en train d'être épelée
+bool okEnvoye = true;          // "OK" renvoyé quand le soliste a fini sa phrase
+
+bool choeurActif = false;      // les chœurs récitent un mot (persiste d'une phrase à l'autre)
+bool choeurSwapEnAttente = false;
+String choeurEnAttente = "";
+
+// Mots de chœur d'une phrase : déclenchés quand le soliste atteint leur position
+#define MAX_TRIGGERS 8
+int triggerIndex[MAX_TRIGGERS];
+String triggerCode[MAX_TRIGGERS];
+bool triggerFired[MAX_TRIGGERS];
+int triggerCount = 0;
+
+int lastSolisteLevel = -1;
+int lastChoeurLevel = -1;
 
 String serialBuffer = "";
 
@@ -70,12 +178,6 @@ void setGroupPWM(const uint8_t* channels, int brightness255) {
   }
 }
 
-const uint8_t* groupChannels(const String& g) {
-  if (g == "A") return channelsA;
-  if (g == "B") return channelsB;
-  return channelsC;
-}
-
 bool channelIsManaged(int channel) {
   for (int i = 0; i < NUM_CH_PER_GROUP; i++) {
     if (channelsA[i] == channel || channelsB[i] == channel || channelsC[i] == channel) return true;
@@ -88,6 +190,7 @@ bool channelIsManaged(int channel) {
 
 // ---- Morse ----
 String lettreToMorse(char c) {
+  if ((unsigned char)c > 127) return "";  // octets UTF-8 (accents, apostrophes typographiques) ignorés
   c = toupper(c);
   switch (c) {
     case 'A': return ".-";
@@ -141,119 +244,190 @@ String phraseToMorse(const String& texte) {
   return resultat;
 }
 
-void avancerMorseSoliste(const uint8_t* channels, const String& code, int& indexSignal, bool& ledAllume, unsigned long& timer) {
-  if (code.length() == 0 || channels == nullptr || indexSignal >= (int)code.length()) return;
-  unsigned long now = millis();
-  char c = code.charAt(indexSignal);
-
-  if (!ledAllume) {
-    if (c == '.' || c == '-') {
-      for (int bri = 0; bri <= 255; bri += 51) {
-        setGroupPWM(channels, bri);
-        delay(15);
-      }
-      timer = now;
-      ledAllume = true;
-    } else if (c == ' ') {
-      unsigned long pauseDuration = (code.charAt(indexSignal + 1) == ' ' || indexSignal + 1 >= (int)code.length()) ? interWordPause : interCharPause;
-      if (now - timer >= pauseDuration) {
-        indexSignal++;
-        timer = now;
-      }
-    } else {
-      indexSignal++;
-    }
-  } else {
-    unsigned long duree = (c == '.') ? dotDuration : dashDuration;
-    if (now - timer >= duree) {
-      for (int bri = 255; bri >= 0; bri -= 51) {
-        setGroupPWM(channels, bri);
-        delay(15);
-      }
-      ledAllume = false;
-      indexSignal++;
-      timer = now;
-    }
-  }
-}
-
-void avancerMorseChoeurs(const uint8_t* channels1, const uint8_t* channels2, const String& code, int& indexSignal, bool& ledAllume, unsigned long& timer) {
-  if (code.length() == 0 || channels1 == nullptr || channels2 == nullptr || indexSignal >= (int)code.length()) return;
-  unsigned long now = millis();
-  char c = code.charAt(indexSignal);
-
-  if (!ledAllume) {
-    if (c == '.' || c == '-') {
-      for (int bri = 20; bri <= 120; bri += 10) {
-        setGroupPWM(channels1, bri);
-        setGroupPWM(channels2, bri);
-        delay(50);
-      }
-      timer = now;
-      ledAllume = true;
-    } else if (c == ' ') {
-      unsigned long pauseDuration = (code.charAt(indexSignal + 1) == ' ' || indexSignal + 1 >= (int)code.length()) ? interWordPause * 2 : interCharPause * 2;
-      if (now - timer >= pauseDuration) {
-        indexSignal++;
-        timer = now;
-      }
-    } else {
-      indexSignal++;
-    }
-  } else {
-    unsigned long duree = (c == '.') ? dotDuration * 3 : dashDuration * 3;
-    if (now - timer >= duree) {
-      for (int bri = 120; bri >= 20; bri -= 10) {
-        setGroupPWM(channels1, bri);
-        setGroupPWM(channels2, bri);
-        delay(50);
-      }
-      ledAllume = false;
-      indexSignal++;
-      timer = now;
-    }
-  }
+// Applique un niveau à un ou deux groupes, seulement s'il a changé (évite du
+// trafic I2C inutile pendant les paliers).
+void appliquerNiveau(const uint8_t* g1, const uint8_t* g2, int level, int& last) {
+  if (level == last) return;
+  if (g1 != nullptr) setGroupPWM(g1, level);
+  if (g2 != nullptr) setGroupPWM(g2, level);
+  last = level;
 }
 
 void resetAllModes() {
-  morseEnCours = false;
+  solisteEnCours = false;
+  choeurActif = false;
+  choeurSwapEnAttente = false;
+  triggerCount = 0;
   setGroupPWM(channelsA, 0);
   setGroupPWM(channelsB, 0);
   setGroupPWM(channelsC, 0);
+  lastSolisteLevel = -1;
+  lastChoeurLevel = -1;
 }
 
-void declamer(String solisteGroupe, String phraseRecue, String motChoeurRecue) {
-  String groupes[3] = {"A", "B", "C"};
-  int idxSoliste = 0;
-  for (int i = 0; i < 3; i++) if (groupes[i] == solisteGroupe) idxSoliste = i;
-  int idxChoeur1 = (idxSoliste + 1) % 3;
-  int idxChoeur2 = (idxSoliste + 2) % 3;
+// Assigne soliste + 2 chœurs. Retourne false si le groupe est inconnu.
+bool preparerGroupes(const String& groupe) {
+  int idx = -1;
+  if (groupe == "A") idx = 0;
+  else if (groupe == "B") idx = 1;
+  else if (groupe == "C") idx = 2;
+  if (idx < 0) return false;
 
-  choeurGroupes[0] = groupes[idxChoeur1];
-  choeurGroupes[1] = groupes[idxChoeur2];
-  soliste = solisteGroupe;
-  phrase = phraseRecue;
-  choeurMot = motChoeurRecue;
+  const uint8_t* groupes[3] = {channelsA, channelsB, channelsC};
+  const uint8_t* s = groupes[idx];
+  const uint8_t* c1 = groupes[(idx + 1) % 3];
+  const uint8_t* c2 = groupes[(idx + 2) % 3];
 
-  solistePins = groupChannels(soliste);
-  choeurPins1 = groupChannels(choeurGroupes[0]);
-  choeurPins2 = groupChannels(choeurGroupes[1]);
+  if (s != solistePins || c1 != choeurPins1 || c2 != choeurPins2) {
+    // les rôles changent : on éteint tout, chaque groupe sera réécrit ensuite
+    setGroupPWM(channelsA, 0);
+    setGroupPWM(channelsB, 0);
+    setGroupPWM(channelsC, 0);
+    lastSolisteLevel = -1;
+    lastChoeurLevel = -1;
+  }
+  solistePins = s;
+  choeurPins1 = c1;
+  choeurPins2 = c2;
+  return true;
+}
 
-  solisteCode = phraseToMorse(phrase);
-  choeurCode = phraseToMorse(choeurMot);
-
-  indexSignalSoliste = 0;
-  indexSignalChoeur = 0;
-  solisteLedAllume = false;
-  choeurLedAllume = false;
-  solisteTimer = millis();
-  choeurTimer = millis();
-  morseEnCours = true;
+void lancerSoliste(const String& code) {
+  voiceStart(soliste, code);
+  solisteEnCours = true;
   okEnvoye = false;
+}
+
+// Nouveau format : "phrase avec *mots* marqués". Le morse du soliste est la
+// phrase entière ; chaque mot marqué devient un déclencheur de chœur placé à
+// l'endroit du morse où le mot commence.
+void declamerTexte(const String& texte) {
+  String code = "";
+  triggerCount = 0;
+  bool dansEtoile = false;
+  String mot = "";
+  int debutMot = 0;
+
+  for (unsigned int i = 0; i < texte.length(); i++) {
+    char ch = texte.charAt(i);
+    if (ch == '*') {
+      if (!dansEtoile) {
+        dansEtoile = true;
+        mot = "";
+        debutMot = code.length();
+      } else {
+        dansEtoile = false;
+        String motCode = phraseToMorse(mot);
+        if (motCode.length() > 0 && triggerCount < MAX_TRIGGERS) {
+          triggerIndex[triggerCount] = debutMot;
+          triggerCode[triggerCount] = motCode;
+          triggerFired[triggerCount] = false;
+          triggerCount++;
+        }
+      }
+      continue;
+    }
+    String m = lettreToMorse(ch);
+    if (m == "") continue;
+    code += (m == " ") ? " " : (m + " ");
+    if (dansEtoile) mot += ch;
+  }
+  lancerSoliste(code);
+}
+
+// Ancien format "M:<soliste>|<phrase>|*<mot>*" : le chœur récite son mot dès
+// le début de la phrase.
+void declamerAncien(const String& phrase, const String& motChoeur) {
+  triggerCount = 0;
+  String motCode = phraseToMorse(motChoeur);
+  if (motCode.length() > 0) {
+    triggerIndex[0] = 0;
+    triggerCode[0] = motCode;
+    triggerFired[0] = false;
+    triggerCount = 1;
+  }
+  lancerSoliste(phraseToMorse(phrase));
+}
+
+// Avance soliste + chœurs d'un cran (appelé à chaque tour de loop()).
+void avancerMorse() {
+  unsigned long now = millis();
+
+  if (solisteEnCours) {
+    voiceUpdate(soliste, now);
+
+    // le soliste arrive sur un mot marqué : les chœurs vont le réciter
+    for (int i = 0; i < triggerCount; i++) {
+      if (!triggerFired[i] && soliste.index >= triggerIndex[i]) {
+        triggerFired[i] = true;
+        choeurEnAttente = triggerCode[i];
+        choeurSwapEnAttente = true;
+      }
+    }
+
+    appliquerNiveau(solistePins, nullptr, soliste.level, lastSolisteLevel);
+
+    if (soliste.phase == V_DONE) {
+      solisteEnCours = false;
+      if (!okEnvoye) {
+        Serial.println("OK");
+        okEnvoye = true;
+      }
+    }
+  }
+
+  // Changement de mot de chœur : on attend la fin du symbole en cours pour
+  // ne pas couper un fondu net.
+  if (choeurSwapEnAttente && (!choeurActif || choeur.phase != V_SYMBOL)) {
+    voiceStart(choeur, choeurEnAttente);
+    choeurActif = true;
+    choeurSwapEnAttente = false;
+  }
+
+  if (choeurActif) {
+    voiceUpdate(choeur, now);
+    appliquerNiveau(choeurPins1, choeurPins2, choeur.level, lastChoeurLevel);
+  }
+}
+
+// ---- Commande M ----
+// Nouveau format : M:<soliste>|<phrase avec *mots* marqués>
+// Ancien format  : M:<soliste>|<phrase>|*<mot>*
+void traiterCommandeM() {
+  // M enchaîné à un autre M : on garde les chœurs en cours (ils continuent
+  // pendant la phrase suivante). Depuis un autre mode : on repart propre.
+  if (currentOpMode != MORSE) resetAllModes();
+  currentOpMode = MORSE;
+
+  int pos1 = serialBuffer.indexOf(':');
+  int pos2 = serialBuffer.indexOf('|', pos1 + 1);
+  if (pos1 == -1 || pos2 == -1) {
+    Serial.println("ERR_FORMAT_M");
+    return;
+  }
+  if (!preparerGroupes(serialBuffer.substring(pos1 + 1, pos2))) {
+    Serial.println("ERR_FORMAT_M");
+    return;
+  }
+
+  int pos3 = serialBuffer.indexOf('|', pos2 + 1);
+  if (pos3 == -1) {
+    declamerTexte(serialBuffer.substring(pos2 + 1));
+  } else {
+    int etoile1 = serialBuffer.indexOf('*', pos3 + 1);
+    int etoile2 = serialBuffer.indexOf('*', etoile1 + 1);
+    if (etoile1 == -1 || etoile2 == -1) {
+      Serial.println("ERR_FORMAT_M");
+      return;
+    }
+    declamerAncien(serialBuffer.substring(pos2 + 1, pos3),
+                   serialBuffer.substring(etoile1 + 1, etoile2));
+  }
 }
 
 // ---- Setup / loop ----
 void setup() {
+  Serial.setRxBufferSize(1024);  // phrases longues : doit précéder Serial.begin()
   Serial.begin(115200);
   delay(1000);
 
@@ -263,9 +437,17 @@ void setup() {
   Wire.begin();
   pwm.begin();
   pwm.setPWMFreq(PWM_FREQ_HZ);
+  Wire.setClock(400000);       // I2C rapide : les fondus mettent à jour plusieurs canaux à chaque tour
 
   pinMode(FUM_PIN, OUTPUT);
   digitalWrite(FUM_PIN, LOW);
+
+  voiceConfig(soliste, SOLISTE_LO, SOLISTE_HI, SOLISTE_FADE_MS,
+              SOLISTE_DOT_MS, SOLISTE_DASH_MS,
+              SOLISTE_CHAR_PAUSE_MS, SOLISTE_WORD_PAUSE_MS, false);
+  voiceConfig(choeur, CHOEUR_LO, CHOEUR_HI, CHOEUR_FADE_MS,
+              CHOEUR_DOT_MS, CHOEUR_DASH_MS,
+              CHOEUR_CHAR_PAUSE_MS, CHOEUR_WORD_PAUSE_MS, true);
 
   resetAllModes();
   currentOpMode = NONE;
@@ -282,26 +464,14 @@ void loop() {
     if (c == '\n') {
       serialBuffer.trim();
 
-      if (serialBuffer == "ID?") {
+      if (serialBuffer.length() == 0) {
+        // ligne vide (ex: "\n" de resynchronisation envoyé par le Pi) : on ignore
+
+      } else if (serialBuffer == "ID?") {
         Serial.println("AQBTCM_LIGHTS");
 
       } else if (serialBuffer.startsWith("M:")) {
-        resetAllModes();
-        currentOpMode = MORSE;
-        int pos1 = serialBuffer.indexOf(':');
-        int pos2 = serialBuffer.indexOf('|', pos1 + 1);
-        int pos3 = serialBuffer.indexOf('|', pos2 + 1);
-        int posStar1 = serialBuffer.indexOf('*', pos3 + 1);
-        int posStar2 = serialBuffer.indexOf('*', posStar1 + 1);
-        if (pos1 != -1 && pos2 != -1 && pos3 != -1 && posStar1 != -1 && posStar2 != -1) {
-          declamer(
-            serialBuffer.substring(pos1 + 1, pos2),
-            serialBuffer.substring(pos2 + 1, pos3),
-            serialBuffer.substring(posStar1 + 1, posStar2)
-          );
-        } else {
-          Serial.println("ERR_FORMAT_M");
-        }
+        traiterCommandeM();
 
       } else if (serialBuffer.startsWith("P")) {
         if (currentOpMode == MORSE || currentOpMode == HEARTBEAT) resetAllModes();
@@ -350,25 +520,10 @@ void loop() {
         Serial.println(serialBuffer);
       }
       serialBuffer = "";
-    } else if (serialBuffer.length() < 100) {
+    } else if (serialBuffer.length() < 600) {
       serialBuffer += c;
     }
   }
 
-  if (morseEnCours) {
-    avancerMorseSoliste(solistePins, solisteCode, indexSignalSoliste, solisteLedAllume, solisteTimer);
-    avancerMorseChoeurs(choeurPins1, choeurPins2, choeurCode, indexSignalChoeur, choeurLedAllume, choeurTimer);
-
-    bool solisteFini = (solisteCode.length() == 0 || indexSignalSoliste >= (int)solisteCode.length());
-    bool choeurFini = (choeurCode.length() == 0 || indexSignalChoeur >= (int)choeurCode.length());
-
-    if (solisteFini && choeurFini) {
-      morseEnCours = false;
-      if (currentOpMode == MORSE) currentOpMode = NONE;
-      if (!okEnvoye) {
-        Serial.println("OK");
-        okEnvoye = true;
-      }
-    }
-  }
+  if (currentOpMode == MORSE) avancerMorse();
 }
