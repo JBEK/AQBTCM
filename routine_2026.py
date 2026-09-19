@@ -146,8 +146,8 @@ style_button(btn_test_cw)
 btn_test_cw.pack(fill="x", pady=(0, 6))
 
 btn_phrases = tk.Button(
-    frame, text="Envoyer phrases (morse, soliste B)",
-    command=lambda: run_action(install.envoyer_phrases_origines, "B", "hesiode.txt"),
+    frame, text="Envoyer phrases (morse, soliste A → B → C)",
+    command=lambda: run_action(install.envoyer_phrases_origines, "ABC", "hesiode.txt"),
 )
 style_button(btn_phrases)
 btn_phrases.pack(fill="x", pady=(0, 6))

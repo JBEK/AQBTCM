@@ -221,10 +221,13 @@ class Installation:
             time.sleep(0.05)
         return "timeout"
 
-    def envoyer_phrases_origines(self, soliste="A", fichier="test.txt", battement_toutes_les=None):
-        """Lit le fichier phrase par phrase en morse. Si battement_toutes_les=N,
-        une séquence battement de cœur est jouée entre deux phrases, après
-        chaque groupe de N phrases (jamais au milieu d'une phrase)."""
+    def envoyer_phrases_origines(self, soliste="ABC", fichier="test.txt", battement_toutes_les=None):
+        """Lit le fichier phrase par phrase en morse. `soliste` est la suite des
+        groupes qui se relaient : "ABC" = le soliste change à chaque phrase
+        (A, B, C, A...), "B" = toujours B. Si battement_toutes_les=N, une
+        séquence battement de cœur est jouée entre deux phrases, après chaque
+        groupe de N phrases (jamais au milieu d'une phrase) ; la lecture
+        reprend ensuite avec le soliste suivant dans la rotation."""
         if not os.path.exists(fichier):
             print(f"Fichier {fichier} introuvable.")
             return
@@ -249,7 +252,7 @@ class Installation:
             phrase = " ".join(sans_accents(phrases[i]).split())
             phrase_nettoyee = phrase.replace("*", "")
 
-            cmd = f"M:{soliste}|{phrase}"
+            cmd = f"M:{soliste[i % len(soliste)]}|{phrase}"
             if self.ser_lights and self.ser_lights.is_open:
                 with self._lock_lights:
                     self.ser_lights.reset_input_buffer()  # purge les anciens "OK" (ex: commandes P)
@@ -455,7 +458,7 @@ class Installation:
 
         t_phrases = threading.Thread(
             target=self.envoyer_phrases_origines,
-            args=("B", "hesiode.txt", self.heartbeat_every_n_phrases),
+            args=("ABC", "hesiode.txt", self.heartbeat_every_n_phrases),
         )
         t_phrases.start()
 
