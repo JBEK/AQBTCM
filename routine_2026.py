@@ -76,15 +76,44 @@ root.geometry("420x720")
 root.configure(bg="#f4f4f4")
 root.protocol("WM_DELETE_WINDOW", on_close)
 
-frame = tk.Frame(root, bg="#f4f4f4")
-frame.pack(expand=True, fill="both", padx=20, pady=15)
-
 
 def style_button(btn, font=FONT_NORMAL, bg="#ffffff", fg="#000000", border=1):
     btn.configure(
         font=font, bg=bg, fg=fg, relief="raised", bd=border, padx=10, pady=5,
         cursor="hand2", activebackground="#e6e6e6",
     )
+
+
+# Arrêt d'urgence épinglé en bas, hors de la zone défilante : toujours
+# accessible sans avoir à scroller.
+btn_urgence = tk.Button(root, text="ARRÊT D'URGENCE", command=arret_urgence)
+style_button(btn_urgence, font=FONT_BOLD, bg="#ff0000", fg="#ffffff", border=3)
+btn_urgence.pack(side="bottom", fill="x", padx=20, pady=10)
+
+# Zone défilante (canvas + scrollbar) qui contient tous les autres boutons.
+canvas = tk.Canvas(root, bg="#f4f4f4", highlightthickness=0)
+scrollbar = tk.Scrollbar(root, orient="vertical", command=canvas.yview)
+canvas.configure(yscrollcommand=scrollbar.set)
+scrollbar.pack(side="right", fill="y")
+canvas.pack(side="left", fill="both", expand=True)
+
+frame = tk.Frame(canvas, bg="#f4f4f4", padx=20, pady=15)
+frame_id = canvas.create_window((0, 0), window=frame, anchor="nw")
+frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+canvas.bind("<Configure>", lambda e: canvas.itemconfigure(frame_id, width=e.width))
+
+
+def on_mousewheel(event):
+    # Linux : Button-4/5 ; Windows/macOS : <MouseWheel> avec event.delta
+    if event.num == 4 or event.delta > 0:
+        canvas.yview_scroll(-1, "units")
+    elif event.num == 5 or event.delta < 0:
+        canvas.yview_scroll(1, "units")
+
+
+root.bind_all("<MouseWheel>", on_mousewheel)
+root.bind_all("<Button-4>", on_mousewheel)
+root.bind_all("<Button-5>", on_mousewheel)
 
 
 def section(titre):
@@ -186,10 +215,6 @@ btn_routine.pack(fill="x", pady=(0, 6))
 btn_interrompre = tk.Button(frame, text="Interrompre la routine", command=interrompre_routine)
 style_button(btn_interrompre, font=FONT_BOLD, bg="#cc3333", fg="#ffffff", border=2)
 btn_interrompre.pack(fill="x", pady=(0, 6))
-
-btn_urgence = tk.Button(frame, text="ARRÊT D'URGENCE", command=arret_urgence)
-style_button(btn_urgence, font=FONT_BOLD, bg="#ff0000", fg="#ffffff", border=3)
-btn_urgence.pack(fill="x", pady=(14, 0))
 
 
 if __name__ == "__main__":
