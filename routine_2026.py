@@ -112,6 +112,10 @@ btn_test_ww = tk.Button(frame, text="Test WW (A → B → C)", command=lambda: r
 style_button(btn_test_ww)
 btn_test_ww.pack(fill="x", pady=(0, 6))
 
+btn_test_cw = tk.Button(frame, text="Test CW (A → B → C)", command=lambda: run_action(install.test_cw_sequence))
+style_button(btn_test_cw)
+btn_test_cw.pack(fill="x", pady=(0, 6))
+
 btn_phrases = tk.Button(
     frame, text="Envoyer phrases (morse, soliste B)",
     command=lambda: run_action(install.envoyer_phrases_origines, "B", "hesiode.txt"),

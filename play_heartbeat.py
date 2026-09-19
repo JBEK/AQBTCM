@@ -1,3 +1,6 @@
+import threading
+import time
+
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 from scipy.signal import find_peaks, butter, lfilter
@@ -148,6 +151,8 @@ class HeartbeatSonifier:
         self._n_channels = 2
         self._play_pos = 0
         self._stream = None
+        self._render_lock = threading.Lock()
+        self._fade_gain = 1.0
 
         # enveloppe control-rate (0-1, avant mise à l'échelle vol_min/vol_max),
         # exposée pour piloter des LEDs en phase avec le son sans dupliquer le
@@ -361,7 +366,7 @@ class HeartbeatSonifier:
         pcm = self._audio_float
         n = len(pcm)
         idx = (self._play_pos + np.arange(frames)) % n
-        outdata[:] = pcm[idx]
+        outdata[:] = pcm[idx] * self._fade_gain
         self._play_pos = (self._play_pos + frames) % n
 
     def get_current_envelope(self):
@@ -383,9 +388,18 @@ class HeartbeatSonifier:
             setattr(self, key, value)
         self._render()
 
+    def preload(self):
+        """Calcule le rendu à l'avance, sans démarrer la lecture — à appeler
+        en tâche de fond dès le lancement du programme pour éviter un silence
+        de quelques secondes au tout premier start(). Verrouillé pour éviter
+        un double rendu si start() est aussi appelé pendant le préchargement."""
+        with self._render_lock:
+            if self._audio_float is None:
+                self._render()
+
     def start(self):
-        if self._audio_float is None:
-            self._render()
+        self.preload()
+        self._fade_gain = 1.0
         self._stream = sd.OutputStream(
             samplerate=self._framerate,
             channels=self._n_channels,
@@ -395,19 +409,25 @@ class HeartbeatSonifier:
         )
         self._stream.start()
 
-    def stop(self):
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+    def stop(self, fade_ms=800):
+        """Arrête la lecture en fondu (fade_ms), pour ne jamais couper le son
+        net. fade_ms=0 coupe immédiatement."""
+        if self._stream is None:
+            return
+        if fade_ms > 0:
+            steps = 30
+            for i in range(steps, -1, -1):
+                self._fade_gain = i / steps
+                time.sleep(fade_ms / 1000 / steps)
+        self._stream.stop()
+        self._stream.close()
+        self._stream = None
 
 
 # ============================================================
 # Exemple d'intégration dans un script d'installation plus large
 # ============================================================
 if __name__ == "__main__":
-    import time
-
     sonifier = HeartbeatSonifier("JFD_01.txt")
     sonifier.start()
 

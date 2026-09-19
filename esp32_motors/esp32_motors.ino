@@ -11,11 +11,13 @@
 #include <TMCStepper.h>
 
 #define RXD2 21
-#define TXD2 19
+#define TXD2 22
 #define R_SENSE 0.11f
 
-const uint8_t STEP_PINS[3] = {22, 25, 27};
-const uint8_t DIR_PINS[3]  = {23, 26, 32};
+// câblage réel confirmé sur site
+const uint8_t DIR_PINS[3]  = {19, 27, 33};
+const uint8_t STEP_PINS[3] = {18, 26, 32};
+const uint8_t EN_PINS[3]   = {5, 25, 14};
 const uint8_t TMC_ADDR[3]  = {0, 1, 2};  // câblage MS1/MS2 réel sur site
 
 TMC2209Stepper drivers[3] = {
@@ -46,6 +48,7 @@ MotorState motors[3];
 void startMotorCycle(int id, bool fromCurrentDir = false) {
   MotorState &m = motors[id];
   if (!fromCurrentDir) m.dir = true;  // repart toujours horaire sur un START explicite
+  digitalWrite(EN_PINS[id], LOW);  // réactive le driver (coupé à l'arrêt pour économiser les moteurs)
   digitalWrite(DIR_PINS[id], m.dir ? HIGH : LOW);
   m.cycleStartMs = millis();
   m.delaiActuel = DELAI_MAX;
@@ -55,6 +58,7 @@ void startMotorCycle(int id, bool fromCurrentDir = false) {
 
 void stopMotor(int id) {
   motors[id].active = false;
+  digitalWrite(EN_PINS[id], HIGH);  // désactive le driver : roue libre, pas de chauffe/conso à l'arrêt
 }
 
 void pauseMotorForHeartbeat(int id) {
@@ -63,12 +67,14 @@ void pauseMotorForHeartbeat(int id) {
   if (m.active) {
     m.pausedElapsedMs = millis() - m.cycleStartMs;
     m.active = false;
+    digitalWrite(EN_PINS[id], HIGH);
   }
 }
 
 void resumeMotorAfterHeartbeat(int id) {
   MotorState &m = motors[id];
   if (m.wasActiveBeforePause) {
+    digitalWrite(EN_PINS[id], LOW);
     m.cycleStartMs = millis() - m.pausedElapsedMs;
     m.lastStepMicros = micros();
     m.active = true;
@@ -150,6 +156,8 @@ void setup() {
   for (int i = 0; i < 3; i++) {
     pinMode(STEP_PINS[i], OUTPUT);
     pinMode(DIR_PINS[i], OUTPUT);
+    pinMode(EN_PINS[i], OUTPUT);
+    digitalWrite(EN_PINS[i], HIGH);  // désactivé par défaut : aucun moteur ne tourne au boot
     motors[i] = {false, true, 0, 0, DELAI_MAX, 0, false};
 
     drivers[i].begin();

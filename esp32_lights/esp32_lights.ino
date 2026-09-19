@@ -10,13 +10,19 @@ Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 
 #define PWM_FREQ_HZ 1000   // validé sans scintillement
 #define FUM_PIN 4
+#define OE_PIN 5           // Output Enable du PCA9685 (actif bas), coupure matérielle instantanée
 
-// Chaque groupe = 4 canaux "tubes" + 1 canal "ALL" (bandeau continu du même
-// luminaire), qui suit le groupe comme un 5e tube.
-const uint8_t channelsA[] = {0, 1, 2, 3, 4};
-const uint8_t channelsB[] = {5, 6, 7, 8, 9};
-const uint8_t channelsC[] = {10, 11, 12, 13, 14};
-const int NUM_CH_PER_GROUP = 5;
+// Chaque groupe = 4 canaux "tubes" WW individuels. Le CW (blanc froid) de
+// chaque luminaire est câblé à part : les 4 pattes CW des tubes d'un même
+// luminaire sont bundlées ensemble sur 1 seul canal MOSFET (channelsCW) —
+// accessible seulement en manuel (P<canal>:<valeur>), jamais piloté par le
+// morse ni le heartbeat, pour ne pas casser l'ambiance chaude voulue.
+const uint8_t channelsA[] = {0, 1, 2, 3};
+const uint8_t channelsB[] = {4, 5, 6, 7};
+const uint8_t channelsC[] = {8, 9, 10, 11};
+const int NUM_CH_PER_GROUP = 4;
+
+const uint8_t channelsCW[] = {12, 13, 14};  // CW luminaire 1, 2, 3
 
 enum OpMode { NONE, MORSE, HEARTBEAT, MANUAL_PWM };
 OpMode currentOpMode = NONE;
@@ -73,6 +79,9 @@ const uint8_t* groupChannels(const String& g) {
 bool channelIsManaged(int channel) {
   for (int i = 0; i < NUM_CH_PER_GROUP; i++) {
     if (channelsA[i] == channel || channelsB[i] == channel || channelsC[i] == channel) return true;
+  }
+  for (int i = 0; i < 3; i++) {
+    if (channelsCW[i] == channel) return true;  // CW en manuel uniquement (voir P<canal>:<valeur>)
   }
   return false;
 }
@@ -248,6 +257,9 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
+  pinMode(OE_PIN, OUTPUT);
+  digitalWrite(OE_PIN, HIGH);  // sorties coupées pendant l'init, évite un flash au boot
+
   Wire.begin();
   pwm.begin();
   pwm.setPWMFreq(PWM_FREQ_HZ);
@@ -258,6 +270,8 @@ void setup() {
   resetAllModes();
   currentOpMode = NONE;
   okEnvoye = true;
+
+  digitalWrite(OE_PIN, LOW);  // tout est à zéro, on peut activer les sorties
 
   Serial.println("AQBTCM_LIGHTS prêt.");
 }
@@ -325,6 +339,11 @@ void loop() {
         digitalWrite(FUM_PIN, HIGH);
       } else if (serialBuffer == "FUM_OFF") {
         digitalWrite(FUM_PIN, LOW);
+
+      } else if (serialBuffer == "OE_OFF") {
+        digitalWrite(OE_PIN, HIGH);  // coupure matérielle instantanée de toutes les sorties PWM
+      } else if (serialBuffer == "OE_ON") {
+        digitalWrite(OE_PIN, LOW);   // réactive les sorties (reprend l'état logiciel courant)
 
       } else {
         Serial.print("ERR_UNKNOWN_CMD:");

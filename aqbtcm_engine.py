@@ -20,13 +20,15 @@ from pygame import mixer
 from play_heartbeat import HeartbeatSonifier
 
 # ---------------- Mapping lumières (PCA9685, 15 canaux sur 16) ----------------
-# Chaque groupe = 4 canaux "tubes" + 1 canal "ALL" (bandeau continu du même
-# luminaire), suit le mapping validé dans le plan.
+# 12 canaux WW (4 tubes individuels par luminaire) + 3 canaux CW (un par
+# luminaire, bundle des 4 tubes câblés ensemble sur 1 seul canal MOSFET).
+# Le CW reste manuel uniquement (set_channel), jamais piloté par un groupe.
 LUMINAIRES = {
-    "A": {"tubes": [0, 1, 2, 3], "all": 4},
-    "B": {"tubes": [5, 6, 7, 8], "all": 9},
-    "C": {"tubes": [10, 11, 12, 13], "all": 14},
+    "A": {"tubes": [0, 1, 2, 3]},
+    "B": {"tubes": [4, 5, 6, 7]},
+    "C": {"tubes": [8, 9, 10, 11]},
 }
+LUMINAIRES_CW = {"A": 12, "B": 13, "C": 14}
 GROUPES = ["A", "B", "C"]
 
 ID_LIGHTS = "AQBTCM_LIGHTS"
@@ -44,6 +46,10 @@ class Installation:
 
         self.music_file = music_file
         self.sonifier = HeartbeatSonifier(ecg_file)
+        # précalcule le rendu audio en tâche de fond dès le lancement, pour
+        # que le tout premier battement de cœur n'ait pas de silence pendant
+        # que _render() tourne (~3.5s, mesuré sur JFD_01.txt)
+        threading.Thread(target=self.sonifier.preload, daemon=True).start()
 
         self._smoke_stop = threading.Event()
         self._smoke_thread = None
@@ -125,16 +131,19 @@ class Installation:
         valeur = max(0, min(255, int(valeur)))
         self._send_lights(f"P{canal}:{valeur}")
 
-    def set_group(self, groupe, valeur, include_all=True):
-        info = LUMINAIRES[groupe]
-        for canal in info["tubes"]:
+    def set_group(self, groupe, valeur):
+        for canal in LUMINAIRES[groupe]["tubes"]:
             self.set_channel(canal, valeur)
-        if include_all:
-            self.set_channel(info["all"], valeur)
+
+    def set_cw(self, groupe, valeur):
+        """CW (blanc froid) du luminaire — manuel uniquement, jamais piloté
+        par le morse/heartbeat (voir mapping en tête de fichier)."""
+        self.set_channel(LUMINAIRES_CW[groupe], valeur)
 
     def all_lights_off(self):
         for groupe in GROUPES:
             self.set_group(groupe, 0)
+            self.set_cw(groupe, 0)
 
     def test_ww_sequence(self):
         print("Test WW séquentiel (fade A->B->C)")
@@ -156,6 +165,26 @@ class Installation:
                     time.sleep(0.05)
                 time.sleep(0.1)
         print("Fin test WW")
+
+    def test_cw_sequence(self):
+        print("Test CW séquentiel (fade A->B->C)")
+        for groupe in GROUPES:
+            if self.stop_flag.is_set():
+                print("Test CW interrompu")
+                return
+            for lvl in range(0, 256, 32):
+                if self.stop_flag.is_set():
+                    return
+                self.set_cw(groupe, lvl)
+                time.sleep(0.05)
+            time.sleep(0.2)
+            for lvl in reversed(range(0, 256, 32)):
+                if self.stop_flag.is_set():
+                    return
+                self.set_cw(groupe, lvl)
+                time.sleep(0.05)
+            time.sleep(0.1)
+        print("Fin test CW")
 
     # ==================== LUMIÈRES : MORSE ====================
     def _attendre_ok(self, timeout=145):
@@ -324,8 +353,8 @@ class Installation:
         print("⚠️ ARRÊT D'URGENCE ⚠️")
         self.stop_flag.set()
         if mixer.get_init():
-            mixer.music.stop()
-        self.sonifier.stop()
+            mixer.music.stop()  # coupure instantanée voulue pour l'urgence, pas de fondu
+        self.sonifier.stop(fade_ms=0)  # idem
         self.smoke_stop()
         self.drills_stop_all()
         self.all_lights_off()
