@@ -18,7 +18,10 @@
 const uint8_t DIR_PINS[3]  = {19, 27, 33};
 const uint8_t STEP_PINS[3] = {18, 26, 32};
 const uint8_t EN_PINS[3]   = {5, 25, 14};
-const uint8_t TMC_ADDR[3]  = {0, 1, 2};  // câblage MS1/MS2 réel sur site
+// adresses MS1/MS2 réellement mesurées sur chaque board (slots 1 et 2
+// inversés par rapport à ce qu'on attendait, confirmé au multimètre) :
+// Slot 0 -> adresse 0, Slot 1 -> adresse 2, Slot 2 -> adresse 1.
+const uint8_t TMC_ADDR[3]  = {0, 2, 1};
 
 TMC2209Stepper drivers[3] = {
   TMC2209Stepper(&Serial2, R_SENSE, TMC_ADDR[0]),
@@ -26,20 +29,34 @@ TMC2209Stepper drivers[3] = {
   TMC2209Stepper(&Serial2, R_SENSE, TMC_ADDR[2]),
 };
 
-const unsigned long CYCLE_DUREE_MS = 18000;  // alternance horaire/antihoraire
-const unsigned long ACCEL_MS = 500;
-const unsigned long DECEL_MS = 500;
-const int DELAI_MAX = 800;   // départ lent (µs entre demi-pas)
-const int DELAI_MIN = 120;   // croisière rapide
-const int RAMP_STEP = 4;
+// Chaque perceuse entraîne un mécanisme différent (réduction différente),
+// donc pas de valeur commune : durée de rotation par sens, pause entre les
+// deux sens, et vitesse de croisière (µs entre demi-pas, plus petit = plus
+// rapide), réglés indépendamment pour chacune.
+//   0 = polisseuse : 3s/3s, pause 7s
+//   1 = perceuse S23 : 7s/7s, pause 7s — rampe "douce" (celle testée avant
+//       qu'on trouve le vrai problème d'alim/adresses) : démarrage très
+//       lent, montée en 5s, plutôt que la rampe courte des 2 autres qui la
+//       faisait décrocher
+//   2 = à régler (valeurs provisoires en attendant, identiques à la 1)
+const unsigned long CYCLE_MS[3]  = {3000, 13000, 3000};  // perceuse 2 : 5s montée + 3s pleine vitesse + 5s descente
+const unsigned long PAUSE_MS[3]  = {7000, 7000, 7000};
+const int CRUISE_DELAI[3]        = {120, 120, 120};
+const unsigned long ACCEL_MS[3]  = {500, 5000, 500};
+const unsigned long DECEL_MS[3]  = {500, 5000, 500};
+const int DELAI_MAX[3]           = {800, 4000, 800};  // départ lent (µs entre demi-pas)
+const int RAMP_STEP[3]           = {4, 2, 4};
+
+enum MotorPhase { RUNNING, PAUSED };
 
 struct MotorState {
   bool active;
   bool dir;                     // true = horaire
-  unsigned long cycleStartMs;
+  MotorPhase phase;
+  unsigned long phaseStartMs;    // début de la phase courante (rotation ou pause)
   unsigned long lastStepMicros;
   int delaiActuel;
-  unsigned long pausedElapsedMs;
+  unsigned long pausedElapsedMs; // pour la pause battement de cœur (voir plus bas)
   bool wasActiveBeforePause;
 };
 
@@ -50,8 +67,9 @@ void startMotorCycle(int id, bool fromCurrentDir = false) {
   if (!fromCurrentDir) m.dir = true;  // repart toujours horaire sur un START explicite
   digitalWrite(EN_PINS[id], LOW);  // réactive le driver (coupé à l'arrêt pour économiser les moteurs)
   digitalWrite(DIR_PINS[id], m.dir ? HIGH : LOW);
-  m.cycleStartMs = millis();
-  m.delaiActuel = DELAI_MAX;
+  m.phase = RUNNING;
+  m.phaseStartMs = millis();
+  m.delaiActuel = DELAI_MAX[id];
   m.lastStepMicros = micros();
   m.active = true;
 }
@@ -65,7 +83,7 @@ void pauseMotorForHeartbeat(int id) {
   MotorState &m = motors[id];
   m.wasActiveBeforePause = m.active;
   if (m.active) {
-    m.pausedElapsedMs = millis() - m.cycleStartMs;
+    m.pausedElapsedMs = millis() - m.phaseStartMs;  // conserve l'avancement dans la phase en cours
     m.active = false;
     digitalWrite(EN_PINS[id], HIGH);
   }
@@ -74,8 +92,8 @@ void pauseMotorForHeartbeat(int id) {
 void resumeMotorAfterHeartbeat(int id) {
   MotorState &m = motors[id];
   if (m.wasActiveBeforePause) {
-    digitalWrite(EN_PINS[id], LOW);
-    m.cycleStartMs = millis() - m.pausedElapsedMs;
+    if (m.phase == RUNNING) digitalWrite(EN_PINS[id], LOW);
+    m.phaseStartMs = millis() - m.pausedElapsedMs;
     m.lastStepMicros = micros();
     m.active = true;
   }
@@ -86,22 +104,37 @@ void updateMotor(int id) {
   if (!m.active) return;
 
   unsigned long now = millis();
-  unsigned long elapsed = now - m.cycleStartMs;
+  unsigned long elapsed = now - m.phaseStartMs;
 
-  if (elapsed >= CYCLE_DUREE_MS) {
-    m.dir = !m.dir;
-    digitalWrite(DIR_PINS[id], m.dir ? HIGH : LOW);
-    m.cycleStartMs = now;
-    m.delaiActuel = DELAI_MAX;
-    elapsed = 0;
+  if (m.phase == PAUSED) {
+    if (elapsed >= PAUSE_MS[id]) {
+      // fin de la pause : repart dans l'autre sens
+      m.dir = !m.dir;
+      digitalWrite(DIR_PINS[id], m.dir ? HIGH : LOW);
+      digitalWrite(EN_PINS[id], LOW);
+      m.phase = RUNNING;
+      m.phaseStartMs = now;
+      m.delaiActuel = DELAI_MAX[id];
+      m.lastStepMicros = micros();
+    }
+    return;
+  }
+
+  // phase RUNNING
+  if (elapsed >= CYCLE_MS[id]) {
+    // fin de la rotation dans ce sens : pause, driver désactivé (roue libre)
+    m.phase = PAUSED;
+    m.phaseStartMs = now;
+    digitalWrite(EN_PINS[id], HIGH);
+    return;
   }
 
   unsigned long nowMicros = micros();
   if (nowMicros - m.lastStepMicros >= (unsigned long)m.delaiActuel) {
-    if (elapsed < ACCEL_MS && m.delaiActuel > DELAI_MIN) {
-      m.delaiActuel = max(DELAI_MIN, m.delaiActuel - RAMP_STEP);
-    } else if (CYCLE_DUREE_MS - elapsed < DECEL_MS && m.delaiActuel < DELAI_MAX) {
-      m.delaiActuel = min(DELAI_MAX, m.delaiActuel + RAMP_STEP);
+    if (elapsed < ACCEL_MS[id] && m.delaiActuel > CRUISE_DELAI[id]) {
+      m.delaiActuel = max(CRUISE_DELAI[id], m.delaiActuel - RAMP_STEP[id]);
+    } else if (CYCLE_MS[id] - elapsed < DECEL_MS[id] && m.delaiActuel < DELAI_MAX[id]) {
+      m.delaiActuel = min(DELAI_MAX[id], m.delaiActuel + RAMP_STEP[id]);
     }
     digitalWrite(STEP_PINS[id], HIGH);
     delayMicroseconds(2);  // largeur d'impulsion STEP minimale, négligeable
@@ -123,11 +156,14 @@ void handleCommand(const String& cmd) {
 
   } else if (cmd.startsWith("D") && cmd.indexOf(':') != -1) {
     int sep = cmd.indexOf(':');
-    int id = cmd.substring(1, sep).toInt();
+    // numéro 1/2/3 côté protocole (même numéro que le bouton "Perceuse N" du
+    // GUI et que le câblage réel) ; converti en index de tableau 0/1/2 ici.
+    int num = cmd.substring(1, sep).toInt();
+    int id = num - 1;
     String action = cmd.substring(sep + 1);
-    if (id < 0 || id > 2) {
+    if (num < 1 || num > 3) {
       Serial.print("ERR_DRILL_ID:");
-      Serial.println(id);
+      Serial.println(num);
     } else if (action == "START") {
       startMotorCycle(id);
     } else if (action == "STOP") {
@@ -158,9 +194,12 @@ void setup() {
     pinMode(DIR_PINS[i], OUTPUT);
     pinMode(EN_PINS[i], OUTPUT);
     digitalWrite(EN_PINS[i], HIGH);  // désactivé par défaut : aucun moteur ne tourne au boot
-    motors[i] = {false, true, 0, 0, DELAI_MAX, 0, false};
+    motors[i] = {false, true, RUNNING, 0, 0, DELAI_MAX[i], 0, false};
 
     drivers[i].begin();
+    uint8_t statut = drivers[i].test_connection();
+    Serial.print("Moteur "); Serial.print(i); Serial.print(" test_connection() = "); Serial.print(statut);
+    Serial.println(statut == 0 ? "  -> OK, driver present" : "  -> ECHEC, pas de reponse UART");
     drivers[i].toff(5);
     drivers[i].rms_current(1300);
     drivers[i].microsteps(8);

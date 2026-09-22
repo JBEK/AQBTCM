@@ -16,7 +16,7 @@
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 
 #define PWM_FREQ_HZ 1000   // validé sans scintillement
-#define FUM_PIN 4
+#define FUM_PIN 27         // côté opposé à OE_PIN/I2C, pour simplifier le routage du relais fumée
 #define OE_PIN 5           // Output Enable du PCA9685 (actif bas), coupure matérielle instantanée
 
 // Chaque groupe = 4 canaux "tubes" WW individuels. Le CW (blanc froid) de
