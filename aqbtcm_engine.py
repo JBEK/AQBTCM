@@ -44,7 +44,7 @@ ID_MOTORS = "AQBTCM_MOTORS"
 
 
 class Installation:
-    def __init__(self, ecg_file="JFD_01.txt", music_file="all_new_aqbtcm.mp3"):
+    def __init__(self, ecg_file="JFD_01.txt", music_file="aqbtcm+drone2.mp3"):
         self.stop_flag = threading.Event()
         self._heartbeat_active = threading.Event()
 
