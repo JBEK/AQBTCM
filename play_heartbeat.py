@@ -145,7 +145,6 @@ class HeartbeatSonifier:
         self.master_volume = master_volume
         self.stereo_width = stereo_width
         self.loop_fade_ms = loop_fade_ms
-
         self._audio_float = None
         self._framerate = 44100
         self._n_channels = 2
