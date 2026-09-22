@@ -17,8 +17,8 @@ Chaque carte répond `ID?` par son nom pour s'identifier.
 
 | Commande | Effet |
 |---|---|
-| `D0:START` / `D1:START` / `D2:START` | démarre le moteur 0/1/2 (repart toujours horaire, rampe accel douce) |
-| `D0:STOP` / `D1:STOP` / `D2:STOP` | arrête ce moteur (roue libre, driver désactivé) |
+| `D1:START` / `D2:START` / `D3:START` | démarre la perceuse 1/2/3 (même numéro que le bouton du GUI ; repart toujours horaire, rampe accel douce) |
+| `D1:STOP` / `D2:STOP` / `D3:STOP` | arrête cette perceuse (roue libre, driver désactivé) |
 | `D:ALL:START` | démarre les 3 moteurs |
 | `D:ALL:STOP` | arrête les 3 moteurs |
 
@@ -36,17 +36,21 @@ avec une rampe accélération/décélération de 500ms à chaque changement de s
 
 | Réponse | Signification |
 |---|---|
-| `ERR_DRILL_ID:<n>` | identifiant de moteur invalide (doit être 0, 1 ou 2) |
+| `ERR_DRILL_ID:<n>` | identifiant de perceuse invalide (doit être 1, 2 ou 3) |
 | `ERR_FORMAT_D` | commande `D...` mal formée (ni START ni STOP) |
 | `ERR_UNKNOWN_CMD:<cmd>` | commande non reconnue |
 
 ### Câblage réel
 
-| | DIR | STEP | EN | Adresse TMC (MS1/MS2) |
+| | DIR | STEP | EN | Adresse TMC (MS1/MS2 mesurée) |
 |---|---|---|---|---|
-| Moteur 0 | D19 | D18 | D5 | 0 |
-| Moteur 1 | D27 | D26 | D25 | 1 |
-| Moteur 2 | D33 | D32 | D14 | 2 |
+| Perceuse 1 | D19 | D18 | D5 | 0 |
+| Perceuse 2 | D27 | D26 | D25 | 2 |
+| Perceuse 3 | D33 | D32 | D14 | 1 |
+
+Les adresses des perceuses 2 et 3 sont inversées par rapport à ce qu'on
+attendait à l'origine (confirmé au multimètre) — le firmware en tient compte
+(`TMC_ADDR[] = {0, 2, 1}`), pas besoin de re-souder les jumpers MS1/MS2.
 
 UART2 partagé (TMC2209 ×3) : RX = D21, TX = D22.
 
@@ -123,4 +127,4 @@ jamais piloté automatiquement par le morse ou le heartbeat.
 | Module 1 | Luminaire 1, tubes WW 1-4 (canaux 0-3) | Luminaire 2, tubes WW 1-4 (canaux 4-7) |
 | Module 2 | Luminaire 3, tubes WW 1-4 (canaux 8-11) | CW luminaire 1/2/3 (canaux 12/13/14), IN8 libre |
 
-OE (Output Enable, actif bas) sur D5. I2C : SDA=D21, SCL=D22. Relais fumée sur D4. PWM à 1kHz.
+OE (Output Enable, actif bas) sur D5. I2C : SDA=D21, SCL=D22. Relais fumée sur D27 (côté opposé, pour le routage). PWM à 1kHz.

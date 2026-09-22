@@ -38,11 +38,11 @@ def main():
             if cmd == "q":
                 break
             elif cmd in ("1", "2", "3"):
-                install.drill_start(int(cmd) - 1)
+                install.drill_start(int(cmd))
             elif cmd == "0":
                 install.drills_start_all()
             elif cmd in ("s1", "s2", "s3"):
-                install.drill_stop(int(cmd[1]) - 1)
+                install.drill_stop(int(cmd[1]))
             elif cmd == "sa":
                 install.drills_stop_all()
             elif cmd == "h":

@@ -118,6 +118,14 @@ class Installation:
             setattr(self, attr, None)
 
     # ==================== ENVOI BAS NIVEAU ====================
+    def raw_lights(self, cmd):
+        """Envoi direct d'une commande brute à l'ESP32 LIGHTS (bench test)."""
+        self._send_lights(cmd)
+
+    def raw_motors(self, cmd):
+        """Envoi direct d'une commande brute à l'ESP32 MOTORS (bench test)."""
+        self._send_motors(cmd)
+
     def _send_lights(self, cmd):
         if self.ser_lights and self.ser_lights.is_open:
             with self._lock_lights:
@@ -280,11 +288,14 @@ class Installation:
         print("Fin de l'envoi des phrases.")
 
     # ==================== MOTEURS (perceuses) ====================
-    def drill_start(self, drill_id):
-        self._send_motors(f"D{drill_id}:START")
+    def drill_start(self, drill_num):
+        """drill_num : 1, 2 ou 3 — même numéro que le bouton "Perceuse N" du
+        GUI et que le protocole série (D1/D2/D3), pour ne plus jamais avoir
+        de décalage entre l'affichage, le câblage et le code."""
+        self._send_motors(f"D{drill_num}:START")
 
-    def drill_stop(self, drill_id):
-        self._send_motors(f"D{drill_id}:STOP")
+    def drill_stop(self, drill_num):
+        self._send_motors(f"D{drill_num}:STOP")
 
     def drills_start_all(self):
         self._send_motors("D:ALL:START")
@@ -292,25 +303,25 @@ class Installation:
     def drills_stop_all(self):
         self._send_motors("D:ALL:STOP")
 
-    def test_perceuse(self, drill_id, duree_s=5):
+    def test_perceuse(self, drill_num, duree_s=5):
         """Démarre une perceuse seule pendant duree_s, interruptible."""
-        print(f"Test perceuse {drill_id} ({duree_s}s)")
-        self.drill_start(drill_id)
+        print(f"Test perceuse {drill_num} ({duree_s}s)")
+        self.drill_start(drill_num)
         start = time.time()
         while time.time() - start < duree_s:
             if self.stop_flag.is_set():
                 break
             time.sleep(0.1)
-        self.drill_stop(drill_id)
-        print(f"Fin test perceuse {drill_id}")
+        self.drill_stop(drill_num)
+        print(f"Fin test perceuse {drill_num}")
 
     def test_perceuses_sequentiel(self, duree_s=5):
         print("Test perceuses (une par une)")
-        for drill_id in range(3):
+        for drill_num in (1, 2, 3):
             if self.stop_flag.is_set():
                 print("Test perceuses interrompu")
                 return
-            self.test_perceuse(drill_id, duree_s)
+            self.test_perceuse(drill_num, duree_s)
             time.sleep(0.5)
         print("Fin test perceuses")
 

@@ -17,7 +17,7 @@ FONT_NORMAL = ("Helvetica", 10)
 FONT_BOLD = ("Helvetica", 10, "bold")
 
 install = Installation()
-drill_running = {0: False, 1: False, 2: False}
+drill_running = {1: False, 2: False, 3: False}
 
 
 def run_action(fn, *args):
@@ -38,23 +38,25 @@ def connecter():
 
 
 # ---------------- perceuses (boutons individuels) ----------------
-def toggle_drill(drill_id, btn):
-    if drill_running[drill_id]:
-        install.drill_stop(drill_id)
-        drill_running[drill_id] = False
-        btn.config(text=f"Perceuse {drill_id + 1} : démarrer")
+# drill_num : 1, 2 ou 3 — même numéro affiché sur le bouton, envoyé sur le
+# fil (D1/D2/D3) et utilisé dans le firmware. Plus de décalage possible.
+def toggle_drill(drill_num, btn):
+    if drill_running[drill_num]:
+        install.drill_stop(drill_num)
+        drill_running[drill_num] = False
+        btn.config(text=f"Perceuse {drill_num} : démarrer")
     else:
-        install.drill_start(drill_id)
-        drill_running[drill_id] = True
-        btn.config(text=f"Perceuse {drill_id + 1} : arrêter")
+        install.drill_start(drill_num)
+        drill_running[drill_num] = True
+        btn.config(text=f"Perceuse {drill_num} : arrêter")
 
 
 # ---------------- arrêt d'urgence ----------------
 def arret_urgence():
     install.arret_urgence()
-    for i, btn in drill_buttons.items():
-        drill_running[i] = False
-        btn.config(text=f"Perceuse {i + 1} : démarrer")
+    for n, btn in drill_buttons.items():
+        drill_running[n] = False
+        btn.config(text=f"Perceuse {n} : démarrer")
     messagebox.showwarning("Arrêt d'urgence", "Tous les systèmes sont arrêtés.")
 
 
@@ -146,8 +148,8 @@ style_button(btn_test_cw)
 btn_test_cw.pack(fill="x", pady=(0, 6))
 
 btn_phrases = tk.Button(
-    frame, text="Envoyer phrases (morse, soliste A → B → C)",
-    command=lambda: run_action(install.envoyer_phrases_origines, "ABC", "hesiode.txt"),
+    frame, text="Envoyer phrases (morse, soliste B)",
+    command=lambda: run_action(install.envoyer_phrases_origines, "B", "hesiode.txt"),
 )
 style_button(btn_phrases)
 btn_phrases.pack(fill="x", pady=(0, 6))
@@ -159,12 +161,12 @@ btn_lights_off.pack(fill="x")
 # --- tests perceuses ---
 section("Perceuses")
 drill_buttons = {}
-for i in range(3):
-    b = tk.Button(frame, text=f"Perceuse {i + 1} : démarrer")
-    b.configure(command=lambda i=i, b=b: toggle_drill(i, b))
+for n in (1, 2, 3):
+    b = tk.Button(frame, text=f"Perceuse {n} : démarrer")
+    b.configure(command=lambda n=n, b=b: toggle_drill(n, b))
     style_button(b)
     b.pack(fill="x", pady=(0, 4))
-    drill_buttons[i] = b
+    drill_buttons[n] = b
 
 btn_test_drills_seq = tk.Button(
     frame, text="Test séquentiel (1 → 2 → 3)",
