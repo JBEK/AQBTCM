@@ -29,19 +29,28 @@ TMC2209Stepper drivers[3] = {
   TMC2209Stepper(&Serial2, R_SENSE, TMC_ADDR[2]),
 };
 
-// Chaque perceuse entraîne un mécanisme différent (réduction différente),
-// donc pas de valeur commune : durée de rotation par sens, pause entre les
-// deux sens, et vitesse de croisière (µs entre demi-pas, plus petit = plus
-// rapide), réglés indépendamment pour chacune.
-//   0 = polisseuse : 3s/3s, pause 7s
-//   1 = perceuse S23 : 7s/7s, pause 7s — rampe "douce" (celle testée avant
-//       qu'on trouve le vrai problème d'alim/adresses) : démarrage très
-//       lent, montée en 5s, plutôt que la rampe courte des 2 autres qui la
-//       faisait décrocher
+// Chaque machine entraîne un mécanisme différent (réduction différente),
+// donc pas de valeur commune : durée de rotation et pause réglées par sens
+// (index 0 = horaire, 1 = antihoraire — voir MotorState.dir), vitesse de
+// croisière et forme de rampe réglées par machine.
+//   0 = Machine 1 (polisseuse) : 3s/3s, pause 7s des 2 côtés
+//   1 = Machine 2 (S23) : horaire 27s (=2x13s +1s), pause courte 3s, puis
+//       antihoraire 26s (=2x13s), pause longue 7s avant de tout recommencer.
+//       Rampe "douce" (celle testée avant qu'on trouve le vrai problème
+//       d'alim/adresses) : démarrage très lent, montée en 5s, plutôt que la
+//       rampe courte des 2 autres qui la faisait décrocher.
 //   2 = à régler (valeurs provisoires en attendant, identiques à la 1)
-const unsigned long CYCLE_MS[3]  = {3000, 13000, 3000};  // perceuse 2 : 5s montée + 3s pleine vitesse + 5s descente
-const unsigned long PAUSE_MS[3]  = {7000, 7000, 7000};
-const int CRUISE_DELAI[3]        = {120, 120, 120};
+const unsigned long CYCLE_MS[3][2] = {   // [machine][0=horaire,1=antihoraire]
+  {3000, 3000},
+  {27000, 26000},
+  {3000, 3000},
+};
+const unsigned long PAUSE_MS[3][2] = {   // pause après CE sens, avant de repartir
+  {7000, 7000},
+  {3000, 7000},
+  {7000, 7000},
+};
+const int CRUISE_DELAI[3]        = {120, 120, 120};  // vitesse d'origine, avant les ralentissements de la Machine 1
 const unsigned long ACCEL_MS[3]  = {500, 5000, 500};
 const unsigned long DECEL_MS[3]  = {500, 5000, 500};
 const int DELAI_MAX[3]           = {800, 4000, 800};  // départ lent (µs entre demi-pas)
@@ -105,9 +114,13 @@ void updateMotor(int id) {
 
   unsigned long now = millis();
   unsigned long elapsed = now - m.phaseStartMs;
+  // m.dir reflète le sens en cours (RUNNING) ou le sens qui vient de se
+  // terminer (PAUSED, avant de basculer) : dans les deux cas c'est le bon
+  // index pour lire la durée/pause de CE sens.
+  int dirIdx = m.dir ? 0 : 1;
 
   if (m.phase == PAUSED) {
-    if (elapsed >= PAUSE_MS[id]) {
+    if (elapsed >= PAUSE_MS[id][dirIdx]) {
       // fin de la pause : repart dans l'autre sens
       m.dir = !m.dir;
       digitalWrite(DIR_PINS[id], m.dir ? HIGH : LOW);
@@ -121,7 +134,7 @@ void updateMotor(int id) {
   }
 
   // phase RUNNING
-  if (elapsed >= CYCLE_MS[id]) {
+  if (elapsed >= CYCLE_MS[id][dirIdx]) {
     // fin de la rotation dans ce sens : pause, driver désactivé (roue libre)
     m.phase = PAUSED;
     m.phaseStartMs = now;
@@ -133,7 +146,7 @@ void updateMotor(int id) {
   if (nowMicros - m.lastStepMicros >= (unsigned long)m.delaiActuel) {
     if (elapsed < ACCEL_MS[id] && m.delaiActuel > CRUISE_DELAI[id]) {
       m.delaiActuel = max(CRUISE_DELAI[id], m.delaiActuel - RAMP_STEP[id]);
-    } else if (CYCLE_MS[id] - elapsed < DECEL_MS[id] && m.delaiActuel < DELAI_MAX[id]) {
+    } else if (CYCLE_MS[id][dirIdx] - elapsed < DECEL_MS[id] && m.delaiActuel < DELAI_MAX[id]) {
       m.delaiActuel = min(DELAI_MAX[id], m.delaiActuel + RAMP_STEP[id]);
     }
     digitalWrite(STEP_PINS[id], HIGH);
