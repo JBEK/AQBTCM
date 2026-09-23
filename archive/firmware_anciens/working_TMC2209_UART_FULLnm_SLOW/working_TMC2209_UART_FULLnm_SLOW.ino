@@ -2,12 +2,12 @@
 #include <TMCStepper.h>
 
 #define RXD2 21
-#define TXD2 19
-#define STEP_PIN 22
-#define DIR_PIN  23
+#define TXD2 22
+#define STEP_PIN 27
+#define DIR_PIN  26
 
 #define R_SENSE 0.11f
-#define DRIVER_ADDRESS 0b00
+#define DRIVER_ADDRESS 0b10
 
 TMC2209Stepper driver(&Serial2, R_SENSE, DRIVER_ADDRESS);
 

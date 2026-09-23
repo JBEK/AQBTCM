@@ -210,7 +210,8 @@ class Installation:
     def _attendre_ok(self, timeout):
         """Attend la fin du morse d'une phrase. Retourne "ok", "erreur" (l'ESP
         a refusé la commande), "interrompu" (battement de cœur en cours),
-        "stop" ou "timeout"."""
+        "redemarre" (l'ESP a rebooté en pleine phrase — inutile d'attendre le
+        timeout complet), "stop" ou "timeout"."""
         if not self.ser_lights or not self.ser_lights.is_open:
             return "timeout"
         start = time.time()
@@ -226,6 +227,11 @@ class Installation:
                     return "erreur"
                 if "OK" in buffer:
                     return "ok"
+                # l'ESP annonce ce message à chaque démarrage (voir esp32_lights.ino) :
+                # s'il apparaît ici, c'est qu'il a rebooté en cours de phrase (plus la
+                # peine d'attendre les minutes restantes du timeout pour rien)
+                if "AQBTCM_LIGHTS" in buffer:
+                    return "redemarre"
             time.sleep(0.05)
         return "timeout"
 
@@ -246,6 +252,7 @@ class Installation:
         print(f"{len(phrases)} phrases extraites du fichier.")
 
         i = 0
+        tentatives_redemarrage = 0
         while i < len(phrases):
             if self.stop_flag.is_set():
                 print("Envoi phrases interrompu")
@@ -271,6 +278,7 @@ class Installation:
             resultat = self._attendre_ok(timeout=60 + 3 * len(phrase_nettoyee))
             if resultat == "ok":
                 i += 1
+                tentatives_redemarrage = 0
                 if battement_toutes_les and i % battement_toutes_les == 0 and i < len(phrases):
                     self.run_heartbeat_sequence()
             elif resultat == "interrompu":
@@ -278,6 +286,15 @@ class Installation:
             elif resultat == "erreur":
                 print(f"L'ESP32 LIGHTS a refusé la phrase {i + 1}, on passe à la suivante.")
                 i += 1
+                tentatives_redemarrage = 0
+            elif resultat == "redemarre":
+                tentatives_redemarrage += 1
+                if tentatives_redemarrage > 5:
+                    print("L'ESP32 LIGHTS redémarre en boucle, arrêt de l'envoi.")
+                    break
+                print(f"L'ESP32 LIGHTS a redémarré en pleine phrase {i + 1}, on la relit "
+                      f"(essai {tentatives_redemarrage}/5).")
+                time.sleep(1)  # laisse l'ESP finir son setup() avant de renvoyer
             elif resultat == "stop":
                 print("Envoi phrases interrompu")
                 return
