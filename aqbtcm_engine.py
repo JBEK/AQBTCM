@@ -8,6 +8,7 @@ qui affiche la fenêtre et appelle les méthodes de la classe Installation.
 """
 
 import os
+import random
 import re
 import threading
 import time
@@ -44,7 +45,7 @@ ID_MOTORS = "AQBTCM_MOTORS"
 
 
 class Installation:
-    def __init__(self, ecg_file="JFD_01.txt", music_file="aqbtcm+drone2.mp3"):
+    def __init__(self, ecg_file="JFD_01.txt", music_file="aqbtcm+drone_neo.wav"):
         self.stop_flag = threading.Event()
         self._heartbeat_active = threading.Event()
 
@@ -65,10 +66,17 @@ class Installation:
 
         # réglages tunables de la routine (pas de "bonne" valeur imposée par
         # le matériel : à ajuster à l'œil / à l'oreille sur place)
-        self.heartbeat_every_n_phrases = 10
+        self.heartbeat_every_s = 300            # battement toutes les 5 min de lecture
         self.heartbeat_duration_s = 30          # durée du battement (son + lumière)
         self.heartbeat_music_fade_s = 4         # descente / remontée de la musique autour du battement
         self.heartbeat_silence_after_s = 3      # noir et silence entre la fin du battement et la reprise
+        self.lights_fade_out_ms = 6000          # descente des lumières vers le noir avant le battement
+        self.morse_start_delay_s = 10           # temps de musique seule avant que la lecture commence
+        # chaque perceuse démarre à un instant tiré au hasard dans cette
+        # fenêtre (en s après le début de la routine) : elles peuvent partir
+        # ensemble ou décalées, sans ordre imposé
+        self.perceuses_start_min_s = 10
+        self.perceuses_start_max_s = 40
         self.music_volume = 0.6
         self.smoke_pulse_ms = 300
         self.smoke_period_ms = 4000
@@ -165,6 +173,15 @@ class Installation:
             self.set_group(groupe, 0)
             self.set_cw(groupe, 0)
 
+    def lights_fade_out(self, duree_ms=None):
+        """Fait redescendre en douceur vers le noir ce qui est allumé côté
+        morse (soliste + chœurs), au lieu de la coupure sèche d'avant. Le
+        fondu est calculé par l'ESP32 (non bloquant de son côté) ; ici on
+        attend juste qu'il ait fini."""
+        duree_ms = self.lights_fade_out_ms if duree_ms is None else duree_ms
+        self._send_lights(f"F:{int(duree_ms)}")
+        self.stop_flag.wait(duree_ms / 1000)
+
     def test_ww_sequence(self):
         print("Test WW séquentiel (fade A->B->C)")
         for _ in range(2):
@@ -235,13 +252,13 @@ class Installation:
             time.sleep(0.05)
         return "timeout"
 
-    def envoyer_phrases_origines(self, soliste="ABC", fichier="test.txt", battement_toutes_les=None):
+    def envoyer_phrases_origines(self, soliste="ABC", fichier="test.txt"):
         """Lit le fichier phrase par phrase en morse. `soliste` est la suite des
         groupes qui se relaient : "ABC" = le soliste change à chaque phrase
-        (A, B, C, A...), "B" = toujours B. Si battement_toutes_les=N, une
-        séquence battement de cœur est jouée entre deux phrases, après chaque
-        groupe de N phrases (jamais au milieu d'une phrase) ; la lecture
-        reprend ensuite avec le soliste suivant dans la rotation."""
+        (A, B, C, A...), "B" = toujours B. Si un battement de cœur survient
+        pendant une phrase (déclenché par la routine, au temps), l'attente est
+        coupée et la phrase est relue depuis son début une fois le battement
+        fini : la lecture reprend donc là où elle en était."""
         if not os.path.exists(fichier):
             print(f"Fichier {fichier} introuvable.")
             return
@@ -279,8 +296,6 @@ class Installation:
             if resultat == "ok":
                 i += 1
                 tentatives_redemarrage = 0
-                if battement_toutes_les and i % battement_toutes_les == 0 and i < len(phrases):
-                    self.run_heartbeat_sequence()
             elif resultat == "interrompu":
                 print("Lecture interrompue par le battement de cœur, la phrase sera relue.")
             elif resultat == "erreur":
@@ -319,6 +334,26 @@ class Installation:
 
     def drills_stop_all(self):
         self._send_motors("D:ALL:STOP")
+
+    def demarrer_perceuses_aleatoire(self):
+        """Lance les 3 perceuses à des instants tirés au hasard dans la fenêtre
+        [perceuses_start_min_s, perceuses_start_max_s] : elles peuvent partir
+        ensemble ou décalées, sans ordre imposé. Une fois lancée, chaque
+        perceuse enchaîne toute seule ses cycles côté firmware — rien d'autre
+        à envoyer jusqu'au battement de cœur."""
+        for drill_num in (1, 2, 3):
+            delai = random.uniform(self.perceuses_start_min_s, self.perceuses_start_max_s)
+            threading.Thread(
+                target=self._demarrer_perceuse_apres,
+                args=(drill_num, delai),
+                daemon=True,
+            ).start()
+
+    def _demarrer_perceuse_apres(self, drill_num, delai_s):
+        if self.stop_flag.wait(delai_s):
+            return  # arrêt demandé avant que cette perceuse ait démarré
+        print(f"Perceuse {drill_num} démarre (t+{delai_s:.0f}s)")
+        self.drill_start(drill_num)
 
     def test_perceuse(self, drill_num, duree_s=5):
         """Démarre une perceuse seule pendant duree_s, interruptible."""
@@ -422,7 +457,8 @@ class Installation:
         self._heartbeat_active.set()
         try:
             self._send_motors("H:START")
-            self._send_lights("H:0")  # entre en mode battement, tout noir : coupe morse et chœurs
+            self.lights_fade_out()    # descente douce de ce qui est allumé vers le noir
+            self._send_lights("H:0")  # entre en mode battement, déjà au noir : coupe morse et chœurs
 
             if musique_jouait:
                 self._fondu_musique(0.0, self.heartbeat_music_fade_s)
@@ -476,24 +512,39 @@ class Installation:
 
     # ==================== ROUTINE COMPLÈTE ====================
     def routine(self):
+        """Déroulé complet, en boucle jusqu'à interruption :
+
+        1. la musique part seule
+        2. les 3 perceuses démarrent chacune à un instant tiré au hasard, et
+           la lecture morse commence après morse_start_delay_s
+        3. toutes les heartbeat_every_s, tout s'interrompt pour le battement
+           de cœur : perceuses en pause, fondu des lumières vers le noir,
+           battement, silence
+        4. tout reprend où il en était (perceuses dans leur cycle, morse à la
+           phrase interrompue, musique qui remonte) — et on repart pour un tour
+        """
         self.stop_flag.clear()
         print("Routine lancée.")
 
         self.smoke_pulse(repeats=0)
         self.music_start(volume=0.8)
-        self.drills_start_all()
-        time.sleep(3)
+        self.demarrer_perceuses_aleatoire()
 
-        t_phrases = threading.Thread(
-            target=self.envoyer_phrases_origines,
-            args=("ABC", "hesiode.txt", self.heartbeat_every_n_phrases),
-        )
-        t_phrases.start()
+        if not self.stop_flag.wait(self.morse_start_delay_s):
+            t_phrases = threading.Thread(
+                target=self.envoyer_phrases_origines,
+                args=("ABC", "hesiode.txt"),
+                daemon=True,
+            )
+            t_phrases.start()
 
-        while t_phrases.is_alive():
-            if self.stop_flag.is_set():
-                break
-            time.sleep(0.5)
+            while t_phrases.is_alive():
+                # une tranche de lecture, puis on coupe tout pour le battement
+                if self.stop_flag.wait(self.heartbeat_every_s):
+                    break
+                if not t_phrases.is_alive():
+                    break
+                self.run_heartbeat_sequence()
 
         self.smoke_stop()
         self.drills_stop_all()

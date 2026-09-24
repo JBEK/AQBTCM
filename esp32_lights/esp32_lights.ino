@@ -31,7 +31,7 @@ const int NUM_CH_PER_GROUP = 4;
 
 const uint8_t channelsCW[] = {12, 13, 14};  // CW luminaire 1, 2, 3
 
-enum OpMode { NONE, MORSE, HEARTBEAT, MANUAL_PWM };
+enum OpMode { NONE, MORSE, HEARTBEAT, MANUAL_PWM, FADEOUT };
 OpMode currentOpMode = NONE;
 
 // ---- Réglages morse (ms, luminosité 0-255) ----
@@ -390,6 +390,44 @@ void avancerMorse() {
   }
 }
 
+// ---- Fondu de sortie (F:<ms>) ----
+// Avant le battement de cœur, on ne coupe plus les lumières d'un coup : les
+// trois luminaires descendent ensemble vers le noir. Le morse n'avance plus
+// pendant ce fondu — la phrase en cours est de toute façon relue depuis le
+// début après le battement, côté Pi.
+//
+// Le fondu part d'un niveau fixe et non du niveau instantané du morse : le
+// morse clignote, et le soliste est à 0 entre deux symboles (là où il passe
+// le plus clair de son temps). Partir de l'instantané donnait donc un fondu
+// de 0 vers 0 — invisible — une fois sur deux.
+const int FONDU_DEPART = 140;
+
+unsigned long fadeOutStart = 0;
+unsigned long fadeOutDuree = 0;
+int lastFadeLevel = -1;
+
+void lancerFadeOut(unsigned long dureeMs) {
+  fadeOutStart = millis();
+  fadeOutDuree = (dureeMs < 1) ? 1 : dureeMs;
+  lastFadeLevel = -1;
+  currentOpMode = FADEOUT;
+}
+
+void avancerFadeOut() {
+  unsigned long t = millis() - fadeOutStart;
+  if (t >= fadeOutDuree) {
+    resetAllModes();
+    currentOpMode = NONE;
+    return;
+  }
+  int niveau = (int)(FONDU_DEPART * (1.0f - (float)t / (float)fadeOutDuree));
+  if (niveau == lastFadeLevel) return;
+  setGroupPWM(channelsA, niveau);
+  setGroupPWM(channelsB, niveau);
+  setGroupPWM(channelsC, niveau);
+  lastFadeLevel = niveau;
+}
+
 // ---- Commande M ----
 // Nouveau format : M:<soliste>|<phrase avec *mots* marqués>
 // Ancien format  : M:<soliste>|<phrase>|*<mot>*
@@ -491,6 +529,9 @@ void loop() {
           Serial.println("ERR_FORMAT_P");
         }
 
+      } else if (serialBuffer.startsWith("F:")) {
+        lancerFadeOut((unsigned long)serialBuffer.substring(2).toInt());
+
       } else if (serialBuffer.startsWith("H:")) {
         String arg = serialBuffer.substring(2);
         if (arg == "STOP") {
@@ -526,4 +567,5 @@ void loop() {
   }
 
   if (currentOpMode == MORSE) avancerMorse();
+  else if (currentOpMode == FADEOUT) avancerFadeOut();
 }
