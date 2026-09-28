@@ -113,6 +113,12 @@ class Installation:
         # ensemble ou décalées, sans ordre imposé
         self.perceuses_start_min_s = 10
         self.perceuses_start_max_s = 40
+        # Durées de rotation possibles, en secondes, par machine. La routine en
+        # tire une au hasard pour chaque machine listée ici, au lancement puis
+        # après chaque battement de cœur — le rythme change donc d'un bloc de
+        # 5 min à l'autre. Une machine absente de ce dictionnaire garde la durée
+        # compilée dans le firmware (Machine 1 : son cycle court de 3 s).
+        self.cycles_perceuses_s = {2: [10, 20, 30, 40], 3: [10, 20, 30, 40]}
         self.music_volume = 0.6
         self.smoke_pulse_ms = 300
         self.smoke_period_ms = 4000
@@ -425,6 +431,20 @@ class Installation:
     def drills_stop_all(self):
         self._send_motors("D:ALL:STOP")
 
+    def drill_set_cycle(self, drill_num, duree_s):
+        """Fixe la durée de rotation d'une perceuse, la même dans les deux sens.
+        Le firmware l'applique au prochain changement de sens, jamais au milieu
+        d'une rotation. Evite de reflasher pour ajuster un rythme."""
+        self._send_motors(f"D{drill_num}:CYCLE:{int(duree_s * 1000)}")
+
+    def tirer_cycles_perceuses(self):
+        """Tire une durée de rotation au hasard pour chaque machine concernée
+        (voir cycles_perceuses_s) et l'envoie."""
+        for drill_num, choix in self.cycles_perceuses_s.items():
+            duree = random.choice(choix)
+            print(f"Perceuse {drill_num} : rotations de {duree}s")
+            self.drill_set_cycle(drill_num, duree)
+
     def demarrer_perceuses_aleatoire(self):
         """Lance les 3 perceuses à des instants tirés au hasard dans la fenêtre
         [perceuses_start_min_s, perceuses_start_max_s] : elles peuvent partir
@@ -683,6 +703,7 @@ class Installation:
 
             self.smoke_pulse(repeats=0)
             self.music_start(volume=0.8)
+            self.tirer_cycles_perceuses()
             self.demarrer_perceuses_aleatoire()
 
             if not self.stop_flag.wait(self.morse_start_delay_s):
@@ -700,6 +721,8 @@ class Installation:
                     if not t_phrases.is_alive():
                         break
                     self.run_heartbeat_sequence()
+                    # nouveau rythme pour le bloc qui suit
+                    self.tirer_cycles_perceuses()
         finally:
             # quoi qu'il arrive — y compris sur une exception en pleine routine —
             # rien ne doit rester en marche sans surveillance

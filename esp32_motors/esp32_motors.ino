@@ -36,16 +36,20 @@ TMC2209Stepper drivers[3] = {
 // (index 0 = horaire, 1 = antihoraire — voir MotorState.dir), vitesse de
 // croisière et forme de rampe réglées par machine.
 //   0 = Machine 1 (polisseuse) : 3s/3s, pause 7s des 2 côtés
-//   1 = Machine 2 (S23) : 1min30 (90s) dans chaque sens, à l'essai avec la
-//       vitesse +20%. Rampe "douce" (celle testée avant qu'on trouve le vrai
-//       problème d'alim/adresses) : démarrage très lent, montée en 5s,
-//       plutôt que la rampe courte des 2 autres qui la faisait décrocher.
-//   2 = Machine 3 : réglages identiques à Machine 2 (demandé explicitement)
-const unsigned long CYCLE_MS[3][2] = {   // [machine][0=horaire,1=antihoraire]
-  {3000, 3000},
-  {90000, 90000},
-  {90000, 90000},
-};
+//   1 = Machine 2 (S23) : 60s dans chaque sens (50s de croisière après la
+//       rampe). Rampe "douce" (celle testée avant qu'on trouve le vrai
+//       problème d'alim/adresses) : démarrage très lent, montée en 5s, plutôt
+//       que la rampe courte de Machine 1 qui la faisait décrocher.
+//   2 = Machine 3 : 20s dans chaque sens — plus calée sur Machine 2 depuis
+//       qu'on allonge celle-ci seule.
+// Une seule durée par machine : la rotation dure toujours autant dans un sens
+// que dans l'autre. Ces valeurs sont le REPLI, utilisé au démarrage et si le Pi
+// n'envoie rien — il peut les remplacer à chaud avec D<n>:CYCLE:<ms>, ce qui
+// évite de reflasher pour ajuster un rythme.
+const unsigned long CYCLE_MS[3] = {3000, 60000, 20000};
+
+unsigned long cycleActifMs[3];      // durée réellement utilisée en ce moment
+unsigned long cycleEnAttenteMs[3];  // 0 = rien en attente ; appliqué au prochain sens
 const unsigned long PAUSE_MS[3][2] = {   // pause après CE sens, avant de repartir
   {7000, 7000},
   {3000, 7000},
@@ -109,7 +113,18 @@ unsigned long delaiPourRPM(float rpm) {
   return (unsigned long)(1000000.0 / (rpm / 60.0 * PAS_PAR_TOUR * MICROSTEPS));
 }
 
+// Adopte la durée demandée par le Pi, s'il y en a une en attente. Appelé
+// seulement aux frontières (démarrage, changement de sens) pour ne jamais
+// tronquer une rotation en cours.
+void appliquerCycleEnAttente(int id) {
+  if (cycleEnAttenteMs[id]) {
+    cycleActifMs[id] = cycleEnAttenteMs[id];
+    cycleEnAttenteMs[id] = 0;
+  }
+}
+
 void startMotorCycle(int id, bool fromCurrentDir = false) {
+  appliquerCycleEnAttente(id);
   MotorState &m = motors[id];
   if (!fromCurrentDir) m.dir = true;  // repart toujours horaire sur un START explicite
   digitalWrite(EN_PINS[id], LOW);  // réactive le driver (coupé à l'arrêt pour économiser les moteurs)
@@ -172,6 +187,7 @@ void updateMotor(int id) {
   if (m.phase == PAUSED) {
     if (elapsed >= PAUSE_MS[id][dirIdx]) {
       // fin de la pause : repart dans l'autre sens
+      appliquerCycleEnAttente(id);
       m.dir = !m.dir;
       digitalWrite(DIR_PINS[id], m.dir ? HIGH : LOW);
       digitalWrite(EN_PINS[id], LOW);
@@ -183,7 +199,7 @@ void updateMotor(int id) {
   }
 
   // phase RUNNING
-  if (elapsed >= CYCLE_MS[id][dirIdx]) {
+  if (elapsed >= cycleActifMs[id]) {
     // fin de la rotation dans ce sens : pause. Le driver reste ACTIF (couple
     // de maintien) pendant la pause plutôt que désactivé : en roue libre, le
     // rotor peut légèrement dériver, et le réveil brutal au sens suivant
@@ -195,7 +211,7 @@ void updateMotor(int id) {
     return;
   }
 
-  float rpm = rpmConsigne(id, elapsed, CYCLE_MS[id][dirIdx]);
+  float rpm = rpmConsigne(id, elapsed, cycleActifMs[id]);
   unsigned long delai = delaiPourRPM(rpm);
   unsigned long nowMicros = micros();
   if (nowMicros - m.lastStepMicros >= delai) {
@@ -249,6 +265,25 @@ void handleCommand(const String& cmd) {
       startMotorCycle(id);
     } else if (action == "STOP") {
       stopMotor(id);
+    } else if (action.startsWith("CYCLE:")) {
+      // D<n>:CYCLE:<ms> — durée de rotation, la même dans les deux sens.
+      // Prise en compte au prochain changement de sens, pour ne pas tronquer
+      // la rotation en cours. Bornée : en dessous des deux rampes la vitesse
+      // de croisière ne serait jamais atteinte.
+      unsigned long ms = (unsigned long)action.substring(6).toInt();
+      unsigned long mini = ACCEL_MS[id] + DECEL_MS[id];
+      if (ms < mini) {
+        Serial.print("ERR_CYCLE_TROP_COURT:");
+        Serial.print(ms);
+        Serial.print(":mini=");
+        Serial.println(mini);
+      } else {
+        cycleEnAttenteMs[id] = ms;
+        Serial.print("OK_CYCLE:D");
+        Serial.print(num);
+        Serial.print(":");
+        Serial.println(ms);
+      }
     } else {
       Serial.println("ERR_FORMAT_D");
     }
@@ -276,6 +311,8 @@ void setup() {
     pinMode(EN_PINS[i], OUTPUT);
     digitalWrite(EN_PINS[i], HIGH);  // désactivé par défaut : aucun moteur ne tourne au boot
     motors[i] = {false, true, RUNNING, 0, 0, 0, false};
+    cycleActifMs[i] = CYCLE_MS[i];
+    cycleEnAttenteMs[i] = 0;
 
     drivers[i].begin();
     uint8_t statut = drivers[i].test_connection();
