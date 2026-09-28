@@ -151,6 +151,7 @@ class HeartbeatSonifier:
         self._play_pos = 0
         self._stream = None
         self._render_lock = threading.Lock()
+        self._stop_lock = threading.Lock()
         self._fade_gain = 1.0
 
         # enveloppe control-rate (0-1, avant mise à l'échelle vol_min/vol_max),
@@ -443,17 +444,27 @@ class HeartbeatSonifier:
 
     def stop(self, fade_ms=800):
         """Arrête la lecture en fondu (fade_ms), pour ne jamais couper le son
-        net. fade_ms=0 coupe immédiatement."""
-        if self._stream is None:
-            return
-        if fade_ms > 0:
-            steps = 30
-            for i in range(steps, -1, -1):
-                self._fade_gain = i / steps
-                time.sleep(fade_ms / 1000 / steps)
-        self._stream.stop()
-        self._stream.close()
-        self._stream = None
+        net. fade_ms=0 coupe immédiatement.
+
+        Le fondu dure ; pendant ce temps un autre appel (typiquement un arrêt
+        d'urgence, fade_ms=0) pouvait fermer le flux et le mettre à None, et
+        celui-ci levait ensuite sur None — ce qui tuait le thread de la routine
+        avant qu'elle ait arrêté perceuses et fumée. D'où le verrou, et la
+        revérification du flux après le fondu."""
+        with self._stop_lock:
+            stream = self._stream
+            if stream is None:
+                return
+            if fade_ms > 0:
+                steps = 30
+                for i in range(steps, -1, -1):
+                    self._fade_gain = i / steps
+                    time.sleep(fade_ms / 1000 / steps)
+                if self._stream is not stream:
+                    return  # un autre appel s'en est chargé pendant le fondu
+            stream.stop()
+            stream.close()
+            self._stream = None
 
 
 # ============================================================

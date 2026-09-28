@@ -36,16 +36,15 @@ TMC2209Stepper drivers[3] = {
 // (index 0 = horaire, 1 = antihoraire — voir MotorState.dir), vitesse de
 // croisière et forme de rampe réglées par machine.
 //   0 = Machine 1 (polisseuse) : 3s/3s, pause 7s des 2 côtés
-//   1 = Machine 2 (S23) : horaire 27s (=2x13s +1s), pause courte 3s, puis
-//       antihoraire 26s (=2x13s), pause longue 7s avant de tout recommencer.
-//       Rampe "douce" (celle testée avant qu'on trouve le vrai problème
-//       d'alim/adresses) : démarrage très lent, montée en 5s, plutôt que la
-//       rampe courte des 2 autres qui la faisait décrocher.
+//   1 = Machine 2 (S23) : 1min30 (90s) dans chaque sens, à l'essai avec la
+//       vitesse +20%. Rampe "douce" (celle testée avant qu'on trouve le vrai
+//       problème d'alim/adresses) : démarrage très lent, montée en 5s,
+//       plutôt que la rampe courte des 2 autres qui la faisait décrocher.
 //   2 = Machine 3 : réglages identiques à Machine 2 (demandé explicitement)
 const unsigned long CYCLE_MS[3][2] = {   // [machine][0=horaire,1=antihoraire]
   {3000, 3000},
-  {27000, 26000},
-  {27000, 26000},
+  {90000, 90000},
+  {90000, 90000},
 };
 const unsigned long PAUSE_MS[3][2] = {   // pause après CE sens, avant de repartir
   {7000, 7000},
@@ -59,7 +58,7 @@ const unsigned long PAUSE_MS[3][2] = {   // pause après CE sens, avant de repar
 //   156 RPM -> 1.92 ms : ça grinçait déjà au banc
 //   312 RPM -> 0.96 ms : l'ancien réglage, intenable en charge (le couple
 //                        s'effondre sous la constante de temps L/R ~1.5 ms)
-const float RPM_CROISIERE[3] = {100.0, 100.0, 100.0};
+const float RPM_CROISIERE[3] = {100.0, 120.0, 120.0};  // Machine 2/3 : +20% a l'essai
 const float RPM_DEPART[3]    = {15.0, 15.0, 15.0};
 const unsigned long ACCEL_MS[3]  = {800, 5000, 5000};
 const unsigned long DECEL_MS[3]  = {800, 5000, 5000};
@@ -119,15 +118,25 @@ void startMotorCycle(int id, bool fromCurrentDir = false) {
   m.phaseStartMs = millis();
   m.lastStepMicros = micros();
   m.active = true;
+  m.wasActiveBeforePause = false;  // plus aucune pause de battement en attente de reprise
 }
 
 void stopMotor(int id) {
-  motors[id].active = false;
+  MotorState &m = motors[id];
+  m.active = false;
+  // Un STOP explicite annule toute reprise de battement en attente. Sans ça, un
+  // H:STOP arrivant après (le battement envoie toujours le sien en se terminant,
+  // depuis son propre thread) relisait un drapeau périmé et FAISAIT REPARTIR le
+  // moteur juste après un arrêt d'urgence.
+  m.wasActiveBeforePause = false;
   digitalWrite(EN_PINS[id], HIGH);  // désactive le driver : roue libre, pas de chauffe/conso à l'arrêt
 }
 
 void pauseMotorForHeartbeat(int id) {
   MotorState &m = motors[id];
+  // deuxième H:START d'affilée : ne pas écraser l'état capturé, sinon le drapeau
+  // tombe à false et le H:STOP suivant ne redémarre plus rien (moteurs morts)
+  if (m.wasActiveBeforePause) return;
   m.wasActiveBeforePause = m.active;
   if (m.active) {
     m.pausedElapsedMs = millis() - m.phaseStartMs;  // conserve l'avancement dans la phase en cours
@@ -139,6 +148,7 @@ void pauseMotorForHeartbeat(int id) {
 void resumeMotorAfterHeartbeat(int id) {
   MotorState &m = motors[id];
   if (m.wasActiveBeforePause) {
+    m.wasActiveBeforePause = false;  // consommé : un H:STOP en double ne relancera rien
     // EN reste actif (couple de maintien) aussi bien en RUNNING qu'en
     // PAUSED désormais (voir updateMotor) : on le réactive dans les deux cas.
     digitalWrite(EN_PINS[id], LOW);
@@ -198,8 +208,26 @@ void updateMotor(int id) {
 
 String serialBuffer = "";
 
+// ---- Garde-fou de perte de liaison ----
+// Le Pi envoie un PING toutes les ~2 s. Si plus rien n'arrive pendant
+// SILENCE_MAX_MS (Pi éteint, programme planté, câble USB débranché), on arrête
+// les moteurs de nous-mêmes : sans ça, ils tournaient indéfiniment puisque leur
+// cycle est autonome une fois lancé. Armé seulement après le premier message
+// reçu, pour ne pas couper avant que le Pi ait eu le temps de se connecter.
+const unsigned long SILENCE_MAX_MS = 10000;
+unsigned long dernierMessageMs = 0;
+bool liaisonVue = false;
+bool coupeParGardeFou = false;
+
 void handleCommand(const String& cmd) {
-  if (cmd == "ID?") {
+  dernierMessageMs = millis();
+  liaisonVue = true;
+  coupeParGardeFou = false;
+
+  if (cmd == "PING") {
+    return;  // signal de vie : volontairement sans réponse, pour ne pas polluer le flux
+
+  } else if (cmd == "ID?") {
     Serial.println("AQBTCM_MOTORS");
 
   } else if (cmd == "D:ALL:START") {
@@ -281,6 +309,13 @@ void loop() {
     } else if (serialBuffer.length() < 60) {
       serialBuffer += c;
     }
+  }
+
+  // garde-fou : plus de nouvelles du Pi depuis trop longtemps -> on arrête tout
+  if (liaisonVue && !coupeParGardeFou && millis() - dernierMessageMs > SILENCE_MAX_MS) {
+    coupeParGardeFou = true;
+    for (int i = 0; i < 3; i++) stopMotor(i);
+    Serial.println("GARDE_FOU: plus de liaison, moteurs arretes.");
   }
 
   for (int i = 0; i < 3; i++) updateMotor(i);

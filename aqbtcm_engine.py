@@ -65,6 +65,19 @@ class Installation:
         self._smoke_stop = threading.Event()
         self._smoke_thread = None
 
+        # Un arrêt d'urgence reste VERROUILLÉ : tant que ce drapeau est posé,
+        # aucune action ne redémarre, et seul un réarmement explicite le lève.
+        # Sans ça, n'importe quel bouton de test rabaissait stop_flag et les
+        # threads encore en attente (perceuses, fumée) repartaient tout seuls.
+        self._verrouille = False
+        # gardes de réentrance : un seul déroulé et un seul battement à la fois
+        self._routine_en_cours = threading.Lock()
+        self._battement_en_cours = threading.Lock()
+
+        # signal de vie vers les deux cartes (garde-fou de perte de liaison)
+        self._ping_stop = threading.Event()
+        self.ping_period_s = 2
+
         # réglages tunables de la routine (pas de "bonne" valeur imposée par
         # le matériel : à ajuster à l'œil / à l'oreille sur place)
         self.heartbeat_every_s = 300            # battement toutes les 5 min de lecture
@@ -120,10 +133,7 @@ class Installation:
                 continue
             time.sleep(2)  # laisse l'ESP32 finir son reset après ouverture du port
             try:
-                ser.reset_input_buffer()
-                ser.write(b"\nID?\n")  # le \n vide un éventuel octet parasite à l'ouverture du port
-                time.sleep(0.3)
-                reply = ser.read(ser.in_waiting or 1).decode(errors="ignore").strip()
+                reply = self._sonder_identite(ser)
             except Exception as e:
                 print(f"[CONNECT] {port.device} erreur ID?: {e}")
                 ser.close()
@@ -139,14 +149,53 @@ class Installation:
                 print(f"[CONNECT] {port.device} ne répond pas au protocole AQBTCM ({reply!r})")
                 ser.close()
 
+        if self.ser_lights or self.ser_motors:
+            self._demarrer_signal_de_vie()
         return self.ser_lights is not None, self.ser_motors is not None
 
+    @staticmethod
+    def _sonder_identite(ser, essais=2, fenetre_s=2.0):
+        """Envoie ID? et lit les lignes jusqu'à en trouver une qui ressemble à un
+        identifiant AQBTCM, dans la limite de fenetre_s par essai.
+
+        Une simple attente de 0.3s suivie d'un read() ratait la carte une fois
+        sur trois : si la réponse n'était pas encore arrivée, read() ne ramenait
+        qu'un seul octet ("A"), la carte était déclarée inconnue et le port
+        refermé — ce qui la re-resettait au passage."""
+        for _ in range(essais):
+            ser.reset_input_buffer()
+            ser.write(b"\nID?\n")  # le \n vide un éventuel octet parasite à l'ouverture du port
+            fin = time.time() + fenetre_s
+            while time.time() < fin:
+                ligne = ser.readline().decode(errors="ignore").strip()
+                if ID_LIGHTS in ligne or ID_MOTORS in ligne:
+                    return ligne
+        return ""
+
     def disconnect(self):
+        self._ping_stop.set()
         for attr in ("ser_lights", "ser_motors"):
             ser = getattr(self, attr)
             if ser and ser.is_open:
                 ser.close()
             setattr(self, attr, None)
+
+    def _demarrer_signal_de_vie(self):
+        """Envoie un PING régulier aux deux cartes. Chacune coupe tout d'elle-même
+        si elle ne reçoit plus rien pendant PING_SILENCE_MAX_MS (voir les deux
+        firmwares) : si le Pi meurt ou qu'un câble se débranche, les perceuses
+        s'arrêtent et le fumigène est coupé sans intervention.
+
+        PING est une commande silencieuse : aucune réponse, pour ne pas polluer
+        le flux série que lit _attendre_ok."""
+        self._ping_stop.clear()
+
+        def _run():
+            while not self._ping_stop.wait(self.ping_period_s):
+                self._send_lights("PING")
+                self._send_motors("PING")
+
+        threading.Thread(target=_run, daemon=True).start()
 
     # ==================== ENVOI BAS NIVEAU ====================
     def raw_lights(self, cmd):
@@ -162,8 +211,11 @@ class Installation:
             with self._lock_lights:
                 try:
                     self.ser_lights.write((cmd + "\n").encode())
-                except serial.SerialTimeoutException:
-                    print(f"[LIGHTS] Timeout: {cmd}")
+                except serial.SerialException as e:
+                    # englobe SerialTimeoutException : un câble débranché ou un
+                    # ESP en reset ne doit jamais faire tomber l'appelant (la
+                    # routine mourrait sans avoir arrêté perceuses et fumée)
+                    print(f"[LIGHTS] envoi impossible ({e}): {cmd}")
         else:
             print(f"[LIGHTS] non connecté, commande perdue: {cmd}")
 
@@ -172,8 +224,8 @@ class Installation:
             with self._lock_motors:
                 try:
                     self.ser_motors.write((cmd + "\n").encode())
-                except serial.SerialTimeoutException:
-                    print(f"[MOTORS] Timeout: {cmd}")
+                except serial.SerialException as e:
+                    print(f"[MOTORS] envoi impossible ({e}): {cmd}")
         else:
             print(f"[MOTORS] non connecté, commande perdue: {cmd}")
 
@@ -291,8 +343,14 @@ class Installation:
         phrases = [p.strip() for p in re.split(r"\.\s*", texte) if p.strip()]
         print(f"{len(phrases)} phrases extraites du fichier.")
 
+        # La lecture ne doit JAMAIS s'arrêter d'elle-même : c'est la colonne
+        # vertébrale de l'installation. Après quelques échecs de suite sur une
+        # phrase on passe à la suivante (relire une phrase ou en sauter une est
+        # sans conséquence), mais on ne sort de la boucle que sur stop_flag ou
+        # à la fin du fichier.
+        ECHECS_AVANT_DE_PASSER = 5
         i = 0
-        tentatives_redemarrage = 0
+        echecs = 0
         while i < len(phrases):
             if self.stop_flag.is_set():
                 print("Envoi phrases interrompu")
@@ -301,44 +359,53 @@ class Installation:
             while self._heartbeat_active.is_set() and not self.stop_flag.is_set():
                 time.sleep(0.1)
 
-            # les *mots marqués* restent dans la phrase : le firmware sait ainsi
-            # à quel moment de la lecture les chœurs doivent les reprendre
-            # un retour à la ligne interne couperait la commande en deux côté ESP
-            phrase = " ".join(sans_accents(phrases[i]).split())
-            phrase_nettoyee = phrase.replace("*", "")
+            try:
+                # les *mots marqués* restent dans la phrase : le firmware sait ainsi
+                # à quel moment de la lecture les chœurs doivent les reprendre
+                # un retour à la ligne interne couperait la commande en deux côté ESP
+                phrase = " ".join(sans_accents(phrases[i]).split())
+                phrase_nettoyee = phrase.replace("*", "")
 
-            cmd = f"M:{soliste[i % len(soliste)]}|{phrase}"
-            if self.ser_lights and self.ser_lights.is_open:
-                with self._lock_lights:
-                    self.ser_lights.reset_input_buffer()  # purge les anciens "OK" (ex: commandes P)
-            self._send_lights(cmd)
-            print(f"Envoyé ({i + 1}/{len(phrases)}): {phrase_nettoyee[:60]}")
+                cmd = f"M:{soliste[i % len(soliste)]}|{phrase}"
+                if self.ser_lights and self.ser_lights.is_open:
+                    with self._lock_lights:
+                        self.ser_lights.reset_input_buffer()  # purge les anciens "OK" (ex: commandes P)
+                self._send_lights(cmd)
+                print(f"Envoyé ({i + 1}/{len(phrases)}): {phrase_nettoyee[:60]}")
 
-            # le morse dure environ 1.5 s par caractère : large marge avant de conclure à un blocage
-            resultat = self._attendre_ok(timeout=60 + 3 * len(phrase_nettoyee))
+                # le morse dure environ 1.5 s par caractère : large marge avant de conclure à un blocage
+                resultat = self._attendre_ok(timeout=60 + 3 * len(phrase_nettoyee))
+            except serial.SerialException as e:
+                # liaison qui bronche : on attend et on réessaie, sans tuer le thread
+                print(f"[LIGHTS] liaison perdue pendant la phrase {i + 1} ({e}), on réessaie.")
+                self.stop_flag.wait(2)
+                resultat = "timeout"
+
             if resultat == "ok":
                 i += 1
-                tentatives_redemarrage = 0
+                echecs = 0
             elif resultat == "interrompu":
                 print("Lecture interrompue par le battement de cœur, la phrase sera relue.")
-            elif resultat == "erreur":
-                print(f"L'ESP32 LIGHTS a refusé la phrase {i + 1}, on passe à la suivante.")
-                i += 1
-                tentatives_redemarrage = 0
-            elif resultat == "redemarre":
-                tentatives_redemarrage += 1
-                if tentatives_redemarrage > 5:
-                    print("L'ESP32 LIGHTS redémarre en boucle, arrêt de l'envoi.")
-                    break
-                print(f"L'ESP32 LIGHTS a redémarré en pleine phrase {i + 1}, on la relit "
-                      f"(essai {tentatives_redemarrage}/5).")
-                time.sleep(1)  # laisse l'ESP finir son setup() avant de renvoyer
             elif resultat == "stop":
                 print("Envoi phrases interrompu")
                 return
+            elif resultat == "erreur":
+                print(f"L'ESP32 LIGHTS a refusé la phrase {i + 1}, on passe à la suivante.")
+                i += 1
+                echecs = 0
             else:
-                print("Pas de réponse OK de l'ESP32 LIGHTS, arrêt de l'envoi.")
-                break
+                # "redemarre" (l'ESP a rebooté en pleine phrase) ou "timeout"
+                # (pas de OK : phrase abandonnée côté ESP, ou OK avalé)
+                echecs += 1
+                if echecs >= ECHECS_AVANT_DE_PASSER:
+                    print(f"Phrase {i + 1} increvable après {echecs} essais, on passe à la suivante.")
+                    i += 1
+                    echecs = 0
+                else:
+                    raison = "a redémarré" if resultat == "redemarre" else "n'a pas répondu"
+                    print(f"L'ESP32 LIGHTS {raison} sur la phrase {i + 1}, on la relit "
+                          f"(essai {echecs}/{ECHECS_AVANT_DE_PASSER}).")
+                    self.stop_flag.wait(1)  # laisse l'ESP finir son setup() avant de renvoyer
 
         print("Fin de l'envoi des phrases.")
 
@@ -409,23 +476,35 @@ class Installation:
         pulse_ms = self.smoke_pulse_ms if pulse_ms is None else pulse_ms
         period_ms = self.smoke_period_ms if period_ms is None else period_ms
 
+        # Chaque pulsation a SON propre signal d'arrêt. Avec un signal partagé,
+        # un nouveau smoke_pulse() le rabaissait et ressuscitait l'ancien thread :
+        # les deux s'entrelaçaient et un FUM_ON retardataire pouvait passer après
+        # le FUM_OFF final, laissant le fumigène allumé sans surveillance.
+        arret = threading.Event()
+
         def _run():
             n = 0
-            while not self._smoke_stop.is_set() and not self.stop_flag.is_set():
+            while not arret.is_set() and not self.stop_flag.is_set():
                 self._send_lights("FUM_ON")
-                self._smoke_stop.wait(pulse_ms / 1000)
+                arret.wait(pulse_ms / 1000)
                 self._send_lights("FUM_OFF")
                 n += 1
                 if repeats and n >= repeats:
                     break
-                self._smoke_stop.wait(max(0, (period_ms - pulse_ms) / 1000))
+                arret.wait(max(0, (period_ms - pulse_ms) / 1000))
 
-        self._smoke_stop.clear()
+        self.smoke_stop()  # coupe proprement une pulsation déjà en cours
+        self._smoke_stop = arret
         self._smoke_thread = threading.Thread(target=_run, daemon=True)
         self._smoke_thread.start()
 
     def smoke_stop(self):
         self._smoke_stop.set()
+        # on attend que le thread soit sorti AVANT le dernier FUM_OFF, pour que
+        # OFF soit toujours la dernière commande envoyée au fumigène
+        thread = self._smoke_thread
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2)
         self._send_lights("FUM_OFF")
 
     # ==================== MUSIQUE ====================
@@ -441,7 +520,10 @@ class Installation:
         self.music_volume = volume
         mixer.music.load(self.music_file)
         mixer.music.set_volume(volume)
-        mixer.music.play()
+        # loops=-1 : la piste fait 9 min, sans bouclage l'installation jouait
+        # dans le silence tout le reste de la journée. Le fichier commence et
+        # finit sur du silence, donc le raccord est inaudible.
+        mixer.music.play(loops=-1)
         print("Musique lancée")
 
     def _fondu_musique(self, volume_cible, duree_s):
@@ -472,6 +554,11 @@ class Installation:
         5. les perceuses repartent, la musique remonte, et l'appelant reprend la lecture
         """
         duration_s = self.heartbeat_duration_s if duration_s is None else duration_s
+        # un seul battement à la fois : deux en parallèle écrasent le flux audio
+        # du sonifier, et le premier devient impossible à arrêter
+        if not self._battement_en_cours.acquire(blocking=False):
+            print("Un battement de cœur est déjà en cours.")
+            return
         print("Début séquence battement de cœur")
 
         musique_jouait = mixer.get_init() and mixer.music.get_busy()
@@ -534,6 +621,7 @@ class Installation:
                     daemon=True,
                 ).start()
             self._heartbeat_active.clear()
+            self._battement_en_cours.release()
         print("Fin séquence battement de cœur")
 
     def run_heartbeat_sequence_thread(self, duration_s=None):
@@ -544,14 +632,28 @@ class Installation:
     # ==================== ARRÊT D'URGENCE ====================
     def arret_urgence(self):
         print("⚠️ ARRÊT D'URGENCE ⚠️")
+        self._verrouille = True   # rien ne redémarrera avant un rearmer() explicite
         self.stop_flag.set()
+        # les parties mobiles d'abord, puis le fumigène : c'est ce qui compte
+        # quand quelqu'un appuie sur le bouton rouge
+        self.drills_stop_all()
+        self.smoke_stop()
+        self.all_lights_off()
         if mixer.get_init():
             mixer.music.stop()  # coupure instantanée voulue pour l'urgence, pas de fondu
         self.sonifier.stop(fade_ms=0)  # idem
-        self.smoke_stop()
-        self.drills_stop_all()
-        self.all_lights_off()
         print("Tous les systèmes ont été mis hors tension.")
+
+    def rearmer(self):
+        """Lève le verrou posé par un arrêt d'urgence. Seul point d'entrée qui
+        autorise à nouveau la routine et les tests à démarrer."""
+        self._verrouille = False
+        self.stop_flag.clear()
+        print("Réarmé : la routine et les tests peuvent repartir.")
+
+    @property
+    def verrouille(self):
+        return self._verrouille
 
     # ==================== ROUTINE COMPLÈTE ====================
     def routine(self):
@@ -566,33 +668,46 @@ class Installation:
         4. tout reprend où il en était (perceuses dans leur cycle, morse à la
            phrase interrompue, musique qui remonte) — et on repart pour un tour
         """
-        self.stop_flag.clear()
-        print("Routine lancée.")
+        if self._verrouille:
+            print("Arrêt d'urgence actif : réarmer avant de lancer la routine.")
+            return
+        # un seul déroulé à la fois : deux routines en parallèle donneraient deux
+        # lecteurs morse sur le même port et deux battements dont l'un rend le
+        # flux audio de l'autre injoignable (donc impossible à arrêter)
+        if not self._routine_en_cours.acquire(blocking=False):
+            print("Une routine tourne déjà.")
+            return
+        try:
+            self.stop_flag.clear()
+            print("Routine lancée.")
 
-        self.smoke_pulse(repeats=0)
-        self.music_start(volume=0.8)
-        self.demarrer_perceuses_aleatoire()
+            self.smoke_pulse(repeats=0)
+            self.music_start(volume=0.8)
+            self.demarrer_perceuses_aleatoire()
 
-        if not self.stop_flag.wait(self.morse_start_delay_s):
-            t_phrases = threading.Thread(
-                target=self.envoyer_phrases_origines,
-                args=("ABC", "hesiode.txt"),
-                daemon=True,
-            )
-            t_phrases.start()
+            if not self.stop_flag.wait(self.morse_start_delay_s):
+                t_phrases = threading.Thread(
+                    target=self.envoyer_phrases_origines,
+                    args=("ABC", "hesiode.txt"),
+                    daemon=True,
+                )
+                t_phrases.start()
 
-            while t_phrases.is_alive():
-                # une tranche de lecture, puis on coupe tout pour le battement
-                if self.stop_flag.wait(self.heartbeat_every_s):
-                    break
-                if not t_phrases.is_alive():
-                    break
-                self.run_heartbeat_sequence()
-
-        self.smoke_stop()
-        self.drills_stop_all()
-        self.music_stop()
-        print("Fin de routine.")
+                while t_phrases.is_alive():
+                    # une tranche de lecture, puis on coupe tout pour le battement
+                    if self.stop_flag.wait(self.heartbeat_every_s):
+                        break
+                    if not t_phrases.is_alive():
+                        break
+                    self.run_heartbeat_sequence()
+        finally:
+            # quoi qu'il arrive — y compris sur une exception en pleine routine —
+            # rien ne doit rester en marche sans surveillance
+            self.smoke_stop()
+            self.drills_stop_all()
+            self.music_stop()
+            self._routine_en_cours.release()
+            print("Fin de routine.")
 
     def routine_thread(self):
         threading.Thread(target=self.routine, daemon=True).start()

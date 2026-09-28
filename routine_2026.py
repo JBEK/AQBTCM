@@ -24,10 +24,25 @@ DRILL_NAMES = {1: "Machine 1 : polisseuse", 2: "Machine 2 : S23", 3: "Machine 3"
 
 
 def run_action(fn, *args):
-    """Relance une action en tâche de fond, en levant d'abord un éventuel
-    stop_flag posé par un arrêt d'urgence ou une interruption précédente."""
+    """Lance une action en tâche de fond.
+
+    Ne lève PLUS le stop_flag de lui-même : c'est ce qui annulait silencieusement
+    un arrêt d'urgence et laissait repartir tout seuls les threads encore en
+    attente (perceuses, fumée). Après un arrêt d'urgence, il faut passer
+    explicitement par « Réarmer »."""
+    if install.verrouille:
+        messagebox.showwarning(
+            "Arrêt d'urgence actif",
+            "Clique sur « Réarmer » avant de relancer quoi que ce soit.",
+        )
+        return
     install.stop_flag.clear()
     threading.Thread(target=fn, args=args, daemon=True).start()
+
+
+def rearmer():
+    install.rearmer()
+    messagebox.showinfo("Réarmé", "Les systèmes peuvent repartir.")
 
 
 # ---------------- connexion ----------------
@@ -49,6 +64,12 @@ def toggle_drill(drill_num, btn):
         drill_running[drill_num] = False
         btn.config(text=f"{DRILL_NAMES[drill_num]} : démarrer")
     else:
+        if install.verrouille:   # arrêt d'urgence actif : rien ne redémarre
+            messagebox.showwarning(
+                "Arrêt d'urgence actif",
+                "Clique sur « Réarmer » avant de relancer une perceuse.",
+            )
+            return
         install.drill_start(drill_num)
         drill_running[drill_num] = True
         btn.config(text=f"{DRILL_NAMES[drill_num]} : arrêter")
@@ -90,10 +111,15 @@ def style_button(btn, font=FONT_NORMAL, bg="#ffffff", fg="#000000", border=1):
 
 
 # Arrêt d'urgence épinglé en bas, hors de la zone défilante : toujours
-# accessible sans avoir à scroller.
+# accessible sans avoir à scroller. Le réarmement est juste au-dessus : après un
+# arrêt d'urgence, plus rien ne repart tant qu'il n'a pas été cliqué.
 btn_urgence = tk.Button(root, text="ARRÊT D'URGENCE", command=arret_urgence)
 style_button(btn_urgence, font=FONT_BOLD, bg="#ff0000", fg="#ffffff", border=3)
 btn_urgence.pack(side="bottom", fill="x", padx=20, pady=10)
+
+btn_rearmer = tk.Button(root, text="Réarmer (après un arrêt d'urgence)", command=rearmer)
+style_button(btn_rearmer, font=FONT_BOLD, bg="#336633", fg="#ffffff", border=2)
+btn_rearmer.pack(side="bottom", fill="x", padx=20, pady=(0, 4))
 
 # Zone défilante (canvas + scrollbar) qui contient tous les autres boutons.
 canvas = tk.Canvas(root, bg="#f4f4f4", highlightthickness=0)

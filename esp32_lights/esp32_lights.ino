@@ -165,6 +165,17 @@ int lastChoeurLevel = -1;
 
 String serialBuffer = "";
 
+// ---- Garde-fou de perte de liaison ----
+// Le Pi envoie un PING toutes les ~2 s. Si plus rien n'arrive pendant
+// SILENCE_MAX_MS (Pi éteint, programme planté, câble débranché), on coupe tout
+// de nous-mêmes — et surtout le fumigène, qui est le vrai risque s'il reste
+// allumé sans surveillance. Armé seulement après le premier message reçu, pour
+// ne pas couper avant que le Pi ait eu le temps de se connecter.
+const unsigned long SILENCE_MAX_MS = 10000;
+unsigned long dernierMessageMs = 0;
+bool liaisonVue = false;
+bool coupeParGardeFou = false;
+
 // ---- PWM ----
 void setChannelPWM(uint8_t channel, int brightness255) {
   brightness255 = constrain(brightness255, 0, 255);
@@ -502,8 +513,18 @@ void loop() {
     if (c == '\n') {
       serialBuffer.trim();
 
+      dernierMessageMs = millis();
+      liaisonVue = true;
+      coupeParGardeFou = false;
+
       if (serialBuffer.length() == 0) {
         // ligne vide (ex: "\n" de resynchronisation envoyé par le Pi) : on ignore
+
+      // PING AVANT la branche "P" : sans ça il tomberait dans les commandes de
+      // canal (pas de ':' -> ERR_FORMAT_P) et son resetAllModes() tuerait le
+      // morse toutes les 2 secondes. Volontairement sans réponse, pour ne pas
+      // polluer le flux que lit le Pi.
+      } else if (serialBuffer == "PING") {
 
       } else if (serialBuffer == "ID?") {
         Serial.println("AQBTCM_LIGHTS");
@@ -564,6 +585,17 @@ void loop() {
     } else if (serialBuffer.length() < 600) {
       serialBuffer += c;
     }
+  }
+
+  // garde-fou : plus de nouvelles du Pi depuis trop longtemps -> tout s'éteint,
+  // fumigène compris
+  if (liaisonVue && !coupeParGardeFou && millis() - dernierMessageMs > SILENCE_MAX_MS) {
+    coupeParGardeFou = true;
+    digitalWrite(FUM_PIN, LOW);
+    resetAllModes();
+    for (int i = 0; i < 3; i++) setChannelPWM(channelsCW[i], 0);
+    currentOpMode = NONE;
+    Serial.println("GARDE_FOU: plus de liaison, tout est coupe.");
   }
 
   if (currentOpMode == MORSE) avancerMorse();
