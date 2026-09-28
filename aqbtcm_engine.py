@@ -7,6 +7,7 @@ routine complète. Aucun code d'interface graphique - c'est routine_2026.py
 qui affiche la fenêtre et appelle les méthodes de la classe Installation.
 """
 
+import math
 import os
 import random
 import re
@@ -71,6 +72,28 @@ class Installation:
         self.heartbeat_music_fade_s = 4         # descente / remontée de la musique autour du battement
         self.heartbeat_silence_after_s = 3      # noir et silence entre la fin du battement et la reprise
         self.lights_fade_out_ms = 6000          # descente des lumières vers le noir avant le battement
+        # Forme du battement lumineux. Suivre directement la courbe ECG donnait
+        # un clignotement : normalisée, elle est agitée en permanence (allumée
+        # 97% du temps), sans repos entre les battements. Et un seul bond par
+        # battement ne rendait pas le "boum-boum" caractéristique. On repère
+        # donc chaque battement réel (un pic R par cycle cardiaque, détecté à
+        # l'avance dans le fichier ECG) et on joue à chaque fois deux bonds
+        # rapprochés (lub-dub), puis rien jusqu'au battement suivant.
+        self.heartbeat_update_hz = 50
+        self.heartbeat_bump_s = 0.18             # durée de chaque bond (lub ou dub)
+        self.heartbeat_lub_dub_gap_s = 0.15     # silence entre le lub et le dub
+        # entre les bonds (et au repos), la lumière ne redescend pas jusqu'au
+        # noir complet : elle reste à ce niveau plancher (0-255), pour un
+        # fondu plus doux (moins de contraste entre "rien" et le pic du bond)
+        self.heartbeat_pwm_repos = 30
+        self.heartbeat_pwm_pic = 90
+        # comme un vrai cœur, le deuxième bond (dub) monte moins haut que le
+        # premier (lub) : 1.0 = même hauteur, 0.5 = dub à mi-chemin entre le
+        # repos et le pic du lub
+        self.heartbeat_dub_ratio = 0.55
+        # l'œil perçoit la luminosité de façon non linéaire : sans gamma, le
+        # bond paraît sec en haut et écrasé en bas
+        self.heartbeat_gamma = 2.2
         self.morse_start_delay_s = 10           # temps de musique seule avant que la lecture commence
         # chaque perceuse démarre à un instant tiré au hasard dans cette
         # fenêtre (en s après le début de la routine) : elles peuvent partir
@@ -440,7 +463,7 @@ class Installation:
             print("Musique stoppée")
 
     # ==================== BATTEMENT DE CŒUR ====================
-    def run_heartbeat_sequence(self, duration_s=None, update_hz=25):
+    def run_heartbeat_sequence(self, duration_s=None, update_hz=None):
         """Interruption battement de cœur :
         1. les perceuses s'arrêtent et les lumières s'éteignent (fin de la lecture morse)
         2. la musique descend jusqu'au silence
@@ -466,13 +489,33 @@ class Installation:
 
             if not self.stop_flag.is_set():
                 self.sonifier.start()
+                periode = 1 / (update_hz or self.heartbeat_update_hz)
+                bump_s = self.heartbeat_bump_s
+                gap_s = self.heartbeat_lub_dub_gap_s
+                pwm_repos = self.heartbeat_pwm_repos
+                pwm_pic_lub = self.heartbeat_pwm_pic
+                pwm_pic_dub = pwm_repos + (self.heartbeat_pwm_pic - pwm_repos) * self.heartbeat_dub_ratio
                 start = time.time()
                 while time.time() - start < duration_s:
                     if self.stop_flag.is_set():
                         break
-                    env = self.sonifier.get_current_envelope()
-                    self._send_lights(f"H:{int(env * 255)}")
-                    time.sleep(1 / update_hz)
+                    depuis = self.sonifier.get_time_since_last_beat()
+                    bond = 0.0    # position dans le cosinus du bond en cours (0 = repos)
+                    pwm_pic = pwm_pic_lub
+                    if depuis is not None:
+                        if depuis < bump_s:
+                            bond = 0.5 * (1 - math.cos(2 * math.pi * depuis / bump_s))
+                        else:
+                            depuis -= bump_s + gap_s
+                            if 0 <= depuis < bump_s:
+                                bond = 0.5 * (1 - math.cos(2 * math.pi * depuis / bump_s))
+                                pwm_pic = pwm_pic_dub
+                    # gamma applique seulement a la forme de la montee (0-1),
+                    # pas au plancher : celui-ci reste exactement pwm_repos au
+                    # repos et pwm_pic au pic, quel que soit le gamma choisi
+                    pwm = pwm_repos + (pwm_pic - pwm_repos) * bond ** self.heartbeat_gamma
+                    self._send_lights(f"H:{int(pwm)}")
+                    time.sleep(periode)
                 self.sonifier.stop()
 
             self._send_lights("H:STOP")  # tout s'éteint

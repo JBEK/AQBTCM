@@ -155,10 +155,11 @@ class HeartbeatSonifier:
 
         # enveloppe control-rate (0-1, avant mise à l'échelle vol_min/vol_max),
         # exposée pour piloter des LEDs en phase avec le son sans dupliquer le
-        # calcul d'enveloppe (voir get_current_envelope)
+        # calcul d'enveloppe (voir get_envelope_peak)
         self._env_times = None
         self._env_norm = None
         self._duration = 0.0
+        self._beat_times = None
 
     # ---------------- rendu (calculé une seule fois) ----------------
     def _render(self):
@@ -203,6 +204,17 @@ class HeartbeatSonifier:
         self._env_times = t_rel
         self._env_norm = env_norm
         self._duration = duration
+
+        # --- pics R (un par battement cardiaque), pour le motif lumineux
+        # "lub-dub" : contrairement à l'enveloppe locale (agitée en
+        # permanence) ou aux transitoires "boom" ci-dessous (plusieurs par
+        # battement, pensés pour le son), on cherche ici UN pic net par cycle
+        # cardiaque, avec une distance minimale correspondant à 180 bpm max.
+        pic_idx, _ = find_peaks(
+            raw_c, distance=max(1, int(0.33 * sample_rate_hz)),
+            prominence=(raw_c.max() - raw_c.min()) * 0.3,
+        )
+        self._beat_times = t_rel[pic_idx]
 
         # --- transitoires ("boom"), calculés sur les valeurs contraintes aussi ---
         diff = np.diff(raw_c, prepend=raw_c[0])
@@ -368,16 +380,37 @@ class HeartbeatSonifier:
         outdata[:] = pcm[idx] * self._fade_gain
         self._play_pos = (self._play_pos + frames) % n
 
-    def get_current_envelope(self):
-        """Enveloppe (0-1) à l'instant actuel du flux audio, en phase avec ce
-        qui est en train de jouer — pour piloter des LEDs en même temps que le
-        son (AQBTCM : interruption battement de cœur)."""
+    def get_time_since_last_beat(self):
+        """Temps (s) écoulé depuis le dernier pic R passé, en phase avec le
+        son en train de jouer. Le flux boucle : si on est avant le premier
+        battement de la boucle courante, on mesure depuis le dernier battement
+        de la boucle précédente (juste avant la fin), pas depuis 0."""
+        if self._beat_times is None or len(self._beat_times) == 0 or self._duration <= 0:
+            return None
+        speed = max(self.playback_speed, 0.05)
+        t_ecg = ((self._play_pos / self._framerate) * speed) % self._duration
+        idx = np.searchsorted(self._beat_times, t_ecg, side="right") - 1
+        dernier = self._beat_times[idx] if idx >= 0 else self._beat_times[-1] - self._duration
+        return t_ecg - dernier
+
+    def get_envelope_peak(self, window_s=0.02):
+        """Maximum de l'enveloppe (0-1) sur les window_s dernières secondes
+        jouées, en phase avec le son — pour piloter des LEDs en même temps que
+        le son (AQBTCM : interruption battement de cœur).
+
+        On renvoie un maximum local et non la valeur instantanée parce que le
+        pic QRS de l'ECG ne dure que ~80 ms : en l'échantillonnant ponctuellement
+        toutes les 20-40 ms, on le manquait une fois sur deux, ce qui donnait
+        des battements lumineux inégaux."""
         if self._env_times is None or self._duration <= 0:
             return 0.0
         speed = max(self.playback_speed, 0.05)
-        t_ecg = (self._play_pos / self._framerate) * speed
-        t_ecg_wrapped = t_ecg % self._duration
-        return float(np.interp(t_ecg_wrapped, self._env_times, self._env_norm))
+        fin = ((self._play_pos / self._framerate) * speed) % self._duration
+        debut = max(0.0, fin - window_s * speed)
+        i0, i1 = np.searchsorted(self._env_times, [debut, fin])
+        if i1 <= i0:
+            return float(np.interp(fin, self._env_times, self._env_norm))
+        return float(self._env_norm[i0:i1].max())
 
     def update_params(self, **kwargs):
         """Change des réglages et re-rend le buffer à la volée, sans jamais
