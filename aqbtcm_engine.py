@@ -46,7 +46,7 @@ ID_MOTORS = "AQBTCM_MOTORS"
 
 
 class Installation:
-    def __init__(self, ecg_file="JFD_01.txt", music_file="aqbtcm+drone_neo.wav"):
+    def __init__(self, ecg_file="JFD_01.txt", music_file="aqbtcm+drone0210.mp3"):
         self.stop_flag = threading.Event()
         self._heartbeat_active = threading.Event()
 
@@ -530,7 +530,11 @@ class Installation:
     # ==================== MUSIQUE ====================
     def init_music(self):
         if not mixer.get_init():
-            mixer.init()
+            # Tampon de 4096 échantillons (~93 ms). Le défaut de pygame 2 n'est
+            # que de 512 (~12 ms) : trop juste sur le Pi, la moindre charge
+            # (décodage MP3, threads de la routine, interface) le vide et la
+            # musique saute. Pour une musique de fond, la latence est sans effet.
+            mixer.init(frequency=44100, size=-16, channels=2, buffer=4096)
 
     def music_start(self, volume=0.6):
         if not os.path.exists(self.music_file):
@@ -697,6 +701,7 @@ class Installation:
         if not self._routine_en_cours.acquire(blocking=False):
             print("Une routine tourne déjà.")
             return
+        t_phrases = None
         try:
             self.stop_flag.clear()
             print("Routine lancée.")
@@ -729,6 +734,14 @@ class Installation:
             self.smoke_stop()
             self.drills_stop_all()
             self.music_stop()
+            # Les lumières aussi : l'ESP32 est autonome, quand on cesse de lui
+            # envoyer des phrases il finit la sienne et le chœur continue de
+            # réciter son mot en boucle, indéfiniment. On laisse d'abord le
+            # thread morse sortir (il voit stop_flag en moins de 50 ms), sinon
+            # il pourrait envoyer une dernière phrase après l'extinction.
+            if t_phrases is not None:
+                t_phrases.join(timeout=2)
+            self.all_lights_off()
             self._routine_en_cours.release()
             print("Fin de routine.")
 
@@ -739,4 +752,5 @@ class Installation:
         self.stop_flag.set()
         self.music_stop()
         self.smoke_stop()
+        self.all_lights_off()
         print("Signal d'interruption envoyé.")

@@ -62,12 +62,11 @@ const unsigned long PAUSE_MS[3][2] = {   // pause après CE sens, avant de repar
 //   156 RPM -> 1.92 ms : ça grinçait déjà au banc
 //   312 RPM -> 0.96 ms : l'ancien réglage, intenable en charge (le couple
 //                        s'effondre sous la constante de temps L/R ~1.5 ms)
-// Machines 2 et 3 a 50 RPM, même mouvement pour les deux. Pour Machine 3 :
-// à 100 RPM le moteur délivrait déjà presque tout son couple, ralentir n'en
-// ajoute guère, mais son mécanisme dur frotte moins à basse vitesse et la
-// montée en vitesse demande moins d'effort.
-// Essai a 25 RPM (83 pas complets/s) : a 50 RPM (167 pas/s) elles grincaient,
-// soupcon de resonance basse vitesse, typiquement vers 100-200 pas/s.
+// Machines 2 et 3 a 25 RPM, même mouvement pour les deux. A 50 RPM (167 pas
+// complets/s) elles grinçaient même avec plus de courant : résonance basse
+// vitesse du moteur, typiquement vers 100-200 pas/s. A 25 RPM (83 pas/s) le
+// grincement a disparu (vérifié à l'oreille). Ralentir soulage aussi le
+// mécanisme dur de Machine 3, qui frotte moins à basse vitesse.
 const float RPM_CROISIERE[3] = {100.0, 25.0, 25.0};
 
 // Courant RMS par machine, en mA, fixé UNIQUEMENT par le logiciel.
@@ -83,6 +82,13 @@ const float RPM_CROISIERE[3] = {100.0, 25.0, 25.0};
 // limite du couple, même à 50 RPM). 850 mA, rendu supportable par ses longues
 // pauses : en moyenne ~40 % de la chaleur qu'elle produisait à 1050 mA.
 const uint16_t COURANT_MA[3] = {450, 850, 850};  // Machines 2 et 3 alignées (même réglage complet)
+
+// Courant de maintien à l'arrêt, en fraction du courant de rotation (défaut de
+// la bibliothèque : 0.5). Pendant les pauses le driver reste alimenté pour tenir
+// le rotor et éviter le "clac" à la reprise ; en SpreadCycle ce maintien siffle
+// et chauffe. A 30 % : sifflement plus discret, moins de chaleur pendant les
+// longues pauses, et encore largement de quoi empêcher le rotor de dériver.
+const float MAINTIEN = 0.3;
 const float RPM_DEPART[3]    = {15.0, 15.0, 15.0};
 const unsigned long ACCEL_MS[3]  = {800, 5000, 5000};
 const unsigned long DECEL_MS[3]  = {800, 5000, 5000};
@@ -341,7 +347,7 @@ void setup() {
     drivers[i].toff(5);
     // le courant ne doit dépendre QUE du logiciel, pas du potentiomètre de la carte
     drivers[i].I_scale_analog(false);
-    drivers[i].rms_current(COURANT_MA[i]);
+    drivers[i].rms_current(COURANT_MA[i], MAINTIEN);
     drivers[i].microsteps(MICROSTEPS);
     drivers[i].en_spreadCycle(true);  // couple garanti quelles que soient charge et vitesse
     // mode 2 des 3 testés (SpreadCycle + interpolation 256 micropas interne) :
@@ -352,7 +358,8 @@ void setup() {
 
     Serial.print("Moteur "); Serial.print(i);
     Serial.print(" courant applique = "); Serial.print(drivers[i].rms_current());
-    Serial.print(" mA, potentiometre ");
+    Serial.print(" mA (maintien "); Serial.print(drivers[i].cs2rms(drivers[i].ihold()));
+    Serial.print(" mA), potentiometre ");
     Serial.println(drivers[i].I_scale_analog() ? "PRIS EN COMPTE (!)" : "ignore");
   }
 
