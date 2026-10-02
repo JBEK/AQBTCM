@@ -88,7 +88,7 @@ class HeartbeatSonifier:
 
     def __init__(self, ecg_file, max_duration_s=None,
                  vol_min=0.25, vol_max=0.9, bed_gain=1.0, roll_window_s=1.5,
-                 playback_speed=1.0,  # 1.0=vitesse d'origine, <1 ralentit les battements
+                 playback_speed=0.75,  # 1.0=vitesse d'origine (~90 bpm), <1 ralentit le cœur
                  clip_percentile=2,          # contraint les valeurs extrêmes (%)
                  root_freq=130.81,           # C3 : accord chaud (fondamentale+quinte+octave)
                  fifth_gain=0.45, octave_gain=0.25,
@@ -96,9 +96,12 @@ class HeartbeatSonifier:
                  vibrato_hz=0.12, vibrato_cents=3,
                  chorus_width=0.0,
                  noise_level=0.035, noise_cutoff_hz=600,
-                 boom_percentile=90, boom_min_distance_s=0.05,
                  boom_duration_s=0.22, boom_gain=0.52, boom_attack_s=0.02,
-                 boom_pitch=55, boom_sweep=35, boom_warmth=0.0,
+                 boom_pitch=85, boom_sweep=20, boom_warmth=0.0,
+                 dub_gain=0.55,              # intensité du 2e battement (dub) / 1er (lub)
+                 lub_dub_s=0.33,             # écart entre lub et dub (s d'ECG), comme la lumière
+                 lub_align_s=0.09,           # cale le sommet du boum sur celui du bond lumineux
+                 bed_smooth_s=0.2,           # lissage du volume de la nappe
                  echo_delay_s=0.28, echo_feedback=0.35, echo_repeats=5, echo_mix=0.0,
                  delay_delay_s=0.12, delay_feedback=0.45, delay_repeats=10, delay_mix=0.0,
                  reverb_size=0.5, reverb_decay_s=1.2, reverb_mix=0.0,
@@ -122,9 +125,11 @@ class HeartbeatSonifier:
         self.chorus_width = chorus_width
         self.noise_level = noise_level
         self.noise_cutoff_hz = noise_cutoff_hz
-        self.boom_percentile = boom_percentile
-        self.boom_min_distance_s = boom_min_distance_s
         self.boom_duration_s = boom_duration_s
+        self.dub_gain = dub_gain
+        self.lub_dub_s = lub_dub_s
+        self.lub_align_s = lub_align_s
+        self.bed_smooth_s = bed_smooth_s
         self.boom_gain = boom_gain
         self.boom_attack_s = boom_attack_s
         self.boom_pitch = boom_pitch
@@ -154,11 +159,6 @@ class HeartbeatSonifier:
         self._stop_lock = threading.Lock()
         self._fade_gain = 1.0
 
-        # enveloppe control-rate (0-1, avant mise à l'échelle vol_min/vol_max),
-        # exposée pour piloter des LEDs en phase avec le son sans dupliquer le
-        # calcul d'enveloppe (voir get_envelope_peak)
-        self._env_times = None
-        self._env_norm = None
         self._duration = 0.0
         self._beat_times = None
 
@@ -201,9 +201,13 @@ class HeartbeatSonifier:
         roll_range = np.maximum(roll_max - roll_min, 1e-6)
         env_norm = (raw_c - roll_min) / roll_range
         env_scaled = self.vol_min + (self.vol_max - self.vol_min) * env_norm
+        # La courbe ECG brute tressaute à chaque onde (P, QRS, T) : la nappe qui
+        # la suivait telle quelle « tremblait » et rendait le son agité. Lissée,
+        # elle respire doucement avec chaque battement.
+        lissage = max(1, int(self.bed_smooth_s * sample_rate_hz))
+        env_scaled = np.convolve(np.pad(env_scaled, lissage, mode="edge"),
+                                 np.ones(lissage) / lissage, mode="same")[lissage:-lissage]
 
-        self._env_times = t_rel
-        self._env_norm = env_norm
         self._duration = duration
 
         # --- pics R (un par battement cardiaque), pour le motif lumineux
@@ -216,18 +220,6 @@ class HeartbeatSonifier:
             prominence=(raw_c.max() - raw_c.min()) * 0.3,
         )
         self._beat_times = t_rel[pic_idx]
-
-        # --- transitoires ("boom"), calculés sur les valeurs contraintes aussi ---
-        diff = np.diff(raw_c, prepend=raw_c[0])
-        diff_smooth = np.convolve(diff, np.ones(3) / 3, mode="same")
-        thresh = np.percentile(diff_smooth, self.boom_percentile)
-        boom_idx, _ = find_peaks(
-            diff_smooth, height=thresh,
-            distance=max(1, int(self.boom_min_distance_s * sample_rate_hz))
-        )
-        boom_times = t_rel[boom_idx]
-        boom_strength = diff_smooth[boom_idx]
-        boom_strength = boom_strength / (boom_strength.max() + 1e-9)
 
         # --- synthèse CONTINUE sur toute la durée (pas de boucle courte) ---
         # playback_speed ralentit/accélère uniquement le déroulé de l'ECG
@@ -324,15 +316,22 @@ class HeartbeatSonifier:
             boom_shape[-tail_fade:] *= np.linspace(1, 0, tail_fade)
         boom_shape /= np.max(np.abs(boom_shape)) + 1e-9
 
-        for bt_time, strength in zip(boom_times, boom_strength):
-            start = int((bt_time / speed) * framerate)
-            end = min(start + boom_len, total_frames)
-            seg_len = end - start
-            if seg_len <= 0:
-                continue
-            burst = boom_shape[:seg_len] * strength * self.boom_gain * 32767
-            sig_l[start:end] += burst
-            sig_r[start:end] += burst
+        # Lub-dub sur chaque battement réel, exactement le motif des bonds
+        # lumineux : un boum sur le pic R, puis un second plus doux (dub_gain)
+        # lub_dub_s plus tard. Avant, un boum tombait sur chaque variation
+        # brusque de l'ECG — environ 3 par battement, irréguliers : son agité,
+        # et décalé de la lumière. lub_align_s cale le sommet de chaque boum sur
+        # le sommet du bond lumineux plutôt que sur son départ.
+        for bt_time in self._beat_times:
+            for decalage, gain in ((0.0, 1.0), (self.lub_dub_s, self.dub_gain)):
+                sommet = (bt_time + decalage + self.lub_align_s) / speed
+                start = int(max(0.0, sommet - self.boom_attack_s) * framerate)
+                end = min(start + boom_len, total_frames)
+                if end <= start:
+                    continue
+                burst = boom_shape[:end - start] * gain * self.boom_gain * 32767
+                sig_l[start:end] += burst
+                sig_r[start:end] += burst
 
         # --- effets (echo / delay / reverb), tous à mix=0 par défaut ---
         for apply_fx, args in (
@@ -369,7 +368,7 @@ class HeartbeatSonifier:
         self._audio_float = (final / 32768.0).astype(np.float32)
         self._play_pos = 0
         print(f"[HeartbeatSonifier] Rendu prêt : {duration:.1f}s continues, "
-              f"{len(boom_idx)} booms détectés")
+              f"{len(self._beat_times)} battements (lub-dub)")
 
     # ---------------- flux audio continu (jamais réouvert) ----------------
     def _callback(self, outdata, frames, time_info, status):
@@ -393,25 +392,6 @@ class HeartbeatSonifier:
         idx = np.searchsorted(self._beat_times, t_ecg, side="right") - 1
         dernier = self._beat_times[idx] if idx >= 0 else self._beat_times[-1] - self._duration
         return t_ecg - dernier
-
-    def get_envelope_peak(self, window_s=0.02):
-        """Maximum de l'enveloppe (0-1) sur les window_s dernières secondes
-        jouées, en phase avec le son — pour piloter des LEDs en même temps que
-        le son (AQBTCM : interruption battement de cœur).
-
-        On renvoie un maximum local et non la valeur instantanée parce que le
-        pic QRS de l'ECG ne dure que ~80 ms : en l'échantillonnant ponctuellement
-        toutes les 20-40 ms, on le manquait une fois sur deux, ce qui donnait
-        des battements lumineux inégaux."""
-        if self._env_times is None or self._duration <= 0:
-            return 0.0
-        speed = max(self.playback_speed, 0.05)
-        fin = ((self._play_pos / self._framerate) * speed) % self._duration
-        debut = max(0.0, fin - window_s * speed)
-        i0, i1 = np.searchsorted(self._env_times, [debut, fin])
-        if i1 <= i0:
-            return float(np.interp(fin, self._env_times, self._env_norm))
-        return float(self._env_norm[i0:i1].max())
 
     def update_params(self, **kwargs):
         """Change des réglages et re-rend le buffer à la volée, sans jamais

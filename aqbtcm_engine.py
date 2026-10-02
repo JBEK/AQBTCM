@@ -7,6 +7,8 @@ routine complète. Aucun code d'interface graphique - c'est routine_2026.py
 qui affiche la fenêtre et appelle les méthodes de la classe Installation.
 """
 
+import inspect
+import json
 import math
 import os
 import random
@@ -41,6 +43,24 @@ def sans_accents(texte):
     return "".join(c for c in unicodedata.normalize("NFD", texte) if not unicodedata.combining(c))
 
 
+REGLAGES_SON_COEUR = "heartbeat_settings.json"
+
+
+def _reglages_son_coeur():
+    """Réglages du son du cœur validés dans heartbeat_tuner.py, s'il y en a.
+    Seuls les paramètres que HeartbeatSonifier connaît encore sont gardés : un
+    fichier enregistré avec une ancienne version ne doit pas empêcher le
+    démarrage. Le calage lub-dub n'en fait pas partie, il suit la lumière."""
+    try:
+        with open(REGLAGES_SON_COEUR, encoding="utf-8") as f:
+            reglages = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    connus = inspect.signature(HeartbeatSonifier.__init__).parameters
+    return {k: v for k, v in reglages.items()
+            if k in connus and k not in ("ecg_file", "lub_dub_s", "lub_align_s")}
+
+
 ID_LIGHTS = "AQBTCM_LIGHTS"
 ID_MOTORS = "AQBTCM_MOTORS"
 
@@ -56,11 +76,6 @@ class Installation:
         self._lock_motors = threading.Lock()
 
         self.music_file = music_file
-        self.sonifier = HeartbeatSonifier(ecg_file)
-        # précalcule le rendu audio en tâche de fond dès le lancement, pour
-        # que le tout premier battement de cœur n'ait pas de silence pendant
-        # que _render() tourne (~3.5s, mesuré sur JFD_01.txt)
-        threading.Thread(target=self.sonifier.preload, daemon=True).start()
 
         self._smoke_stop = threading.Event()
         self._smoke_thread = None
@@ -107,6 +122,21 @@ class Installation:
         # l'œil perçoit la luminosité de façon non linéaire : sans gamma, le
         # bond paraît sec en haut et écrasé en bas
         self.heartbeat_gamma = 2.2
+
+        # Le son du cœur bat sur le même motif que la lumière : son calage
+        # (écart lub-dub, sommet du boum au milieu du bond) vient d'ici, pour
+        # que les deux restent synchrones si on retouche les bonds lumineux.
+        # Le reste du son vient des réglages validés dans heartbeat_tuner.py.
+        self.sonifier = HeartbeatSonifier(
+            ecg_file,
+            **_reglages_son_coeur(),
+            lub_dub_s=self.heartbeat_bump_s + self.heartbeat_lub_dub_gap_s,
+            lub_align_s=self.heartbeat_bump_s / 2,
+        )
+        # précalcule le rendu audio en tâche de fond dès le lancement, pour
+        # que le tout premier battement de cœur n'ait pas de silence pendant
+        # que _render() tourne (~3.5s, mesuré sur JFD_01.txt)
+        threading.Thread(target=self.sonifier.preload, daemon=True).start()
         self.morse_start_delay_s = 10           # temps de musique seule avant que la lecture commence
         # chaque perceuse démarre à un instant tiré au hasard dans cette
         # fenêtre (en s après le début de la routine) : elles peuvent partir
@@ -536,7 +566,7 @@ class Installation:
             # musique saute. Pour une musique de fond, la latence est sans effet.
             mixer.init(frequency=44100, size=-16, channels=2, buffer=4096)
 
-    def music_start(self, volume=0.6):
+    def music_start(self, volume=1.0):
         if not os.path.exists(self.music_file):
             print(f"Fichier audio manquant: {self.music_file}")
             return
@@ -707,7 +737,7 @@ class Installation:
             print("Routine lancée.")
 
             self.smoke_pulse(repeats=0)
-            self.music_start(volume=0.8)
+            self.music_start(volume=1.0)
             self.tirer_cycles_perceuses()
             self.demarrer_perceuses_aleatoire()
 
