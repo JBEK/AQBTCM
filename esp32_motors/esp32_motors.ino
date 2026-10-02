@@ -52,8 +52,8 @@ unsigned long cycleActifMs[3];      // durée réellement utilisée en ce moment
 unsigned long cycleEnAttenteMs[3];  // 0 = rien en attente ; appliqué au prochain sens
 const unsigned long PAUSE_MS[3][2] = {   // pause après CE sens, avant de repartir
   {7000, 7000},
-  {3000, 7000},
-  {3000, 7000},
+  {15000, 20000},  // Machines 2 et 3 : longues pauses, elles tournent moins
+  {15000, 20000},  // souvent donc chauffent moins
 };
 
 // Vitesses exprimées en RPM (et non plus en µs de délai) : c'est ce qui
@@ -62,7 +62,27 @@ const unsigned long PAUSE_MS[3][2] = {   // pause après CE sens, avant de repar
 //   156 RPM -> 1.92 ms : ça grinçait déjà au banc
 //   312 RPM -> 0.96 ms : l'ancien réglage, intenable en charge (le couple
 //                        s'effondre sous la constante de temps L/R ~1.5 ms)
-const float RPM_CROISIERE[3] = {100.0, 120.0, 120.0};  // Machine 2/3 : +20% a l'essai
+// Machines 2 et 3 a 50 RPM, même mouvement pour les deux. Pour Machine 3 :
+// à 100 RPM le moteur délivrait déjà presque tout son couple, ralentir n'en
+// ajoute guère, mais son mécanisme dur frotte moins à basse vitesse et la
+// montée en vitesse demande moins d'effort.
+// Essai a 25 RPM (83 pas complets/s) : a 50 RPM (167 pas/s) elles grincaient,
+// soupcon de resonance basse vitesse, typiquement vers 100-200 pas/s.
+const float RPM_CROISIERE[3] = {100.0, 25.0, 25.0};
+
+// Courant RMS par machine, en mA, fixé UNIQUEMENT par le logiciel.
+// Jusqu'ici le courant réel était multiplié en silence par la position du
+// potentiomètre de chaque carte driver (I_scale_analog, actif par défaut dans
+// la bibliothèque) : mesuré sur site, Machine 1 tournait à ~1050 mA et
+// Machines 2/3 à ~340-500 mA, alors que le code demandait 1100 mA aux trois.
+// Le potentiomètre est maintenant ignoré : ces valeurs sont celles appliquées.
+// Machines 1 et 2 tournaient déjà vers 340-500 mA : 450 ne change rien pour
+// elles. Machine 3 (la S15) a un mécanisme dur qui demande beaucoup de couple :
+// son potentiomètre avait été poussé à fond (~1050 mA) et elle brûlait après
+// une heure ; à 450 mA elle se bloque en 2 s, à 700 mA elle grogne encore (à la
+// limite du couple, même à 50 RPM). 850 mA, rendu supportable par ses longues
+// pauses : en moyenne ~40 % de la chaleur qu'elle produisait à 1050 mA.
+const uint16_t COURANT_MA[3] = {450, 850, 850};  // Machines 2 et 3 alignées (même réglage complet)
 const float RPM_DEPART[3]    = {15.0, 15.0, 15.0};
 const unsigned long ACCEL_MS[3]  = {800, 5000, 5000};
 const unsigned long DECEL_MS[3]  = {800, 5000, 5000};
@@ -319,11 +339,9 @@ void setup() {
     Serial.print("Moteur "); Serial.print(i); Serial.print(" test_connection() = "); Serial.print(statut);
     Serial.println(statut == 0 ? "  -> OK, driver present" : "  -> ECHEC, pas de reponse UART");
     drivers[i].toff(5);
-    // 1100 mA RMS ~= 1.55 A crête = courant nominal du moteur (1.5 A).
-    // L'ancien 1300 RMS faisait 1.84 A crête, 22% au-dessus : ça chauffait
-    // le moteur sans rien apporter (à haute vitesse le facteur limitant est
-    // la tension/inductance, pas le courant réglé).
-    drivers[i].rms_current(1100);
+    // le courant ne doit dépendre QUE du logiciel, pas du potentiomètre de la carte
+    drivers[i].I_scale_analog(false);
+    drivers[i].rms_current(COURANT_MA[i]);
     drivers[i].microsteps(MICROSTEPS);
     drivers[i].en_spreadCycle(true);  // couple garanti quelles que soient charge et vitesse
     // mode 2 des 3 testés (SpreadCycle + interpolation 256 micropas interne) :
@@ -331,6 +349,11 @@ void setup() {
     // envoyer), juste une forme d'onde plus douce - donc au moins aussi bon
     // que le mode 1 pour le couple, en plus lisse.
     drivers[i].intpol(true);
+
+    Serial.print("Moteur "); Serial.print(i);
+    Serial.print(" courant applique = "); Serial.print(drivers[i].rms_current());
+    Serial.print(" mA, potentiometre ");
+    Serial.println(drivers[i].I_scale_analog() ? "PRIS EN COMPTE (!)" : "ignore");
   }
 
   Serial.println("AQBTCM_MOTORS prêt.");
