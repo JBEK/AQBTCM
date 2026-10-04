@@ -66,7 +66,7 @@ ID_MOTORS = "AQBTCM_MOTORS"
 
 
 class Installation:
-    def __init__(self, ecg_file="JFD_01.txt", music_file="aqbtcm+drone0210.mp3"):
+    def __init__(self, ecg_file="INES_02.txt", music_file="aqbtcm+drone0210.mp3"):
         self.stop_flag = threading.Event()
         self._heartbeat_active = threading.Event()
 
@@ -96,7 +96,7 @@ class Installation:
         # réglages tunables de la routine (pas de "bonne" valeur imposée par
         # le matériel : à ajuster à l'œil / à l'oreille sur place)
         self.heartbeat_every_s = 300            # battement toutes les 5 min de lecture
-        self.heartbeat_duration_s = 30          # durée du battement (son + lumière)
+        self.heartbeat_duration_s = 35          # durée du battement (son + lumière)
         self.heartbeat_music_fade_s = 4         # descente / remontée de la musique autour du battement
         self.heartbeat_silence_after_s = 3      # noir et silence entre la fin du battement et la reprise
         self.lights_fade_out_ms = 6000          # descente des lumières vers le noir avant le battement
@@ -135,7 +135,7 @@ class Installation:
         )
         # précalcule le rendu audio en tâche de fond dès le lancement, pour
         # que le tout premier battement de cœur n'ait pas de silence pendant
-        # que _render() tourne (~3.5s, mesuré sur JFD_01.txt)
+        # que _render() tourne (~13 s, mesuré sur INES_02.txt)
         threading.Thread(target=self.sonifier.preload, daemon=True).start()
         self.morse_start_delay_s = 10           # temps de musique seule avant que la lecture commence
         # chaque perceuse démarre à un instant tiré au hasard dans cette

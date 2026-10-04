@@ -80,7 +80,7 @@ class HeartbeatSonifier:
     en arrière-plan, sans coupure.
 
     Usage minimal :
-        sonifier = HeartbeatSonifier("JFD_01.txt")
+        sonifier = HeartbeatSonifier("INES_02.txt")
         sonifier.start()   # non bloquant
         ...
         sonifier.stop()
@@ -88,7 +88,7 @@ class HeartbeatSonifier:
 
     def __init__(self, ecg_file, max_duration_s=None,
                  vol_min=0.25, vol_max=0.9, bed_gain=1.0, roll_window_s=1.5,
-                 playback_speed=0.75,  # 1.0=vitesse d'origine (~90 bpm), <1 ralentit le cœur
+                 playback_speed=0.9,   # 1.0=vitesse d'origine (~73 bpm sur INES_02), <1 ralentit le cœur
                  clip_percentile=2,          # contraint les valeurs extrêmes (%)
                  root_freq=130.81,           # C3 : accord chaud (fondamentale+quinte+octave)
                  fifth_gain=0.45, octave_gain=0.25,
@@ -451,7 +451,7 @@ class HeartbeatSonifier:
 # Exemple d'intégration dans un script d'installation plus large
 # ============================================================
 if __name__ == "__main__":
-    sonifier = HeartbeatSonifier("JFD_01.txt")
+    sonifier = HeartbeatSonifier("INES_02.txt")
     sonifier.start()
 
     try:

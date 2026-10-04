@@ -2,7 +2,7 @@
 Petite fenêtre de réglage pour HeartbeatSonifier (play_heartbeat.py).
 
 Chaque slider relâché relance un rendu sur un extrait court (par défaut
-12s de JFD_01.txt) et le joue en boucle en direct, pour entendre l'effet
+12s de INES_02.txt) et le joue en boucle en direct, pour entendre l'effet
 du réglage tout de suite. Le bouton "Valider ces réglages" écrit les
 valeurs choisies dans heartbeat_settings.json, à reporter ensuite dans
 play_heartbeat.py une fois qu'on est content du son.
@@ -16,7 +16,7 @@ from tkinter import ttk
 
 from play_heartbeat import HeartbeatSonifier
 
-ECG_FILE = "JFD_01.txt"
+ECG_FILE = "INES_02.txt"
 PREVIEW_DURATION_S = 12
 SETTINGS_FILE = "heartbeat_settings.json"
 
@@ -49,7 +49,7 @@ PARAMS = {
         ("vol_min", "Volume minimum", 0.0, 0.5, 0.25, 2),
         ("vol_max", "Volume maximum", 0.5, 1.0, 0.9, 2),
         ("bed_gain", "Volume du fond", 0.0, 1.5, 1.0, 2),
-        ("playback_speed", "Vitesse du cœur (1 = ~90 bpm)", 0.2, 2.0, 0.75, 2),
+        ("playback_speed", "Vitesse du cœur (1 = ~73 bpm)", 0.2, 2.0, 0.9, 2),
         ("roll_window_s", "Réactivité à l'ECG (s)", 0.2, 5.0, 1.5, 2),
         ("bed_smooth_s", "Douceur de la nappe (s)", 0.0, 1.0, 0.2, 2),
         ("master_volume", "Volume général", 0.0, 1.5, 1.0, 2),
