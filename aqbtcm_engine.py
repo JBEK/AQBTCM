@@ -66,7 +66,7 @@ ID_MOTORS = "AQBTCM_MOTORS"
 
 
 class Installation:
-    def __init__(self, ecg_file="INES_02.txt", music_file="aqbtcm+drone0210.mp3"):
+    def __init__(self, ecg_file="INES_02.txt", music_file="aqbtcm_track.mp3"):
         self.stop_flag = threading.Event()
         self._heartbeat_active = threading.Event()
 
@@ -143,12 +143,23 @@ class Installation:
         # ensemble ou décalées, sans ordre imposé
         self.perceuses_start_min_s = 10
         self.perceuses_start_max_s = 40
-        # Durées de rotation possibles, en secondes, par machine. La routine en
-        # tire une au hasard pour chaque machine listée ici, au lancement puis
-        # après chaque battement de cœur — le rythme change donc d'un bloc de
-        # 5 min à l'autre. Une machine absente de ce dictionnaire garde la durée
-        # compilée dans le firmware (Machine 1 : son cycle court de 3 s).
-        self.cycles_perceuses_s = {2: [10, 20, 30, 40], 3: [10, 20, 30, 40]}
+        # Chaque perceuse tourne ensuite en continu pour toute la durée de la
+        # routine (voir _boucle_perceuse) : un cycle complet (rotation horaire
+        # + antihoraire, même durée chacune) de durée aléatoire dans la plage
+        # ci-dessous, puis un arrêt complet pendant une pause aléatoire entre
+        # perceuses_pause_min_s et perceuses_pause_max_s, puis un nouveau
+        # cycle — indéfiniment, sauf pendant un battement de cœur (rien ne
+        # redémarre tant qu'il n'est pas terminé, le firmware l'a déjà mis en
+        # pause à ce moment-là). Machines 2 et 3 ont un plancher plus haut que
+        # la Machine 1 : leur rampe accel/décel de 5s par sens (ACCEL_MS/
+        # DECEL_MS dans le firmware) refuse tout cycle complet sous 20s.
+        self.perceuses_cycle_s = {
+            1: (10, 40),
+            2: (20, 40),
+            3: (20, 40),
+        }
+        self.perceuses_pause_min_s = 30
+        self.perceuses_pause_max_s = 240
         self.music_volume = 0.6
         self.smoke_pulse_ms = 300
         self.smoke_period_ms = 4000
@@ -467,33 +478,49 @@ class Installation:
         d'une rotation. Evite de reflasher pour ajuster un rythme."""
         self._send_motors(f"D{drill_num}:CYCLE:{int(duree_s * 1000)}")
 
-    def tirer_cycles_perceuses(self):
-        """Tire une durée de rotation au hasard pour chaque machine concernée
-        (voir cycles_perceuses_s) et l'envoie."""
-        for drill_num, choix in self.cycles_perceuses_s.items():
-            duree = random.choice(choix)
-            print(f"Perceuse {drill_num} : rotations de {duree}s")
-            self.drill_set_cycle(drill_num, duree)
-
     def demarrer_perceuses_aleatoire(self):
-        """Lance les 3 perceuses à des instants tirés au hasard dans la fenêtre
-        [perceuses_start_min_s, perceuses_start_max_s] : elles peuvent partir
-        ensemble ou décalées, sans ordre imposé. Une fois lancée, chaque
-        perceuse enchaîne toute seule ses cycles côté firmware — rien d'autre
-        à envoyer jusqu'au battement de cœur."""
+        """Lance pour chaque perceuse une boucle en tâche de fond
+        (_boucle_perceuse) : premier départ à un instant tiré au hasard dans
+        la fenêtre [perceuses_start_min_s, perceuses_start_max_s] (elles
+        peuvent partir ensemble ou décalées, sans ordre imposé), puis cycles
+        et pauses aléatoires en continu jusqu'à la fin de la routine."""
         for drill_num in (1, 2, 3):
             delai = random.uniform(self.perceuses_start_min_s, self.perceuses_start_max_s)
             threading.Thread(
-                target=self._demarrer_perceuse_apres,
+                target=self._boucle_perceuse,
                 args=(drill_num, delai),
                 daemon=True,
             ).start()
 
-    def _demarrer_perceuse_apres(self, drill_num, delai_s):
-        if self.stop_flag.wait(delai_s):
+    def _boucle_perceuse(self, drill_num, delai_initial_s):
+        """Fait tourner une perceuse en continu pour toute la durée de la
+        routine : cycle complet (rotation horaire + antihoraire, même durée
+        chacune) de durée aléatoire, arrêt complet, pause aléatoire, nouveau
+        cycle... Rien ne redémarre pendant un battement de cœur — le firmware
+        l'a déjà mis en pause à ce moment-là, le relancer par-dessus le
+        court-circuiterait."""
+        if self.stop_flag.wait(delai_initial_s):
             return  # arrêt demandé avant que cette perceuse ait démarré
-        print(f"Perceuse {drill_num} démarre (t+{delai_s:.0f}s)")
-        self.drill_start(drill_num)
+        print(f"Perceuse {drill_num} démarre (t+{delai_initial_s:.0f}s)")
+        while not self.stop_flag.is_set():
+            while self._heartbeat_active.is_set() and not self.stop_flag.is_set():
+                self.stop_flag.wait(0.1)
+            if self.stop_flag.is_set():
+                break
+
+            cycle_min, cycle_max = self.perceuses_cycle_s[drill_num]
+            duree_cycle = random.uniform(cycle_min, cycle_max)
+            self.drill_set_cycle(drill_num, duree_cycle / 2)
+            self.drill_start(drill_num)
+            print(f"Perceuse {drill_num} : cycle de {duree_cycle:.0f}s")
+            if self.stop_flag.wait(duree_cycle):
+                break
+
+            self.drill_stop(drill_num)
+            pause = random.uniform(self.perceuses_pause_min_s, self.perceuses_pause_max_s)
+            print(f"Perceuse {drill_num} : pause de {pause:.0f}s")
+            if self.stop_flag.wait(pause):
+                break
 
     def test_perceuse(self, drill_num, duree_s=5):
         """Démarre une perceuse seule pendant duree_s, interruptible."""
@@ -738,7 +765,6 @@ class Installation:
 
             self.smoke_pulse(repeats=0)
             self.music_start(volume=1.0)
-            self.tirer_cycles_perceuses()
             self.demarrer_perceuses_aleatoire()
 
             if not self.stop_flag.wait(self.morse_start_delay_s):
@@ -756,8 +782,6 @@ class Installation:
                     if not t_phrases.is_alive():
                         break
                     self.run_heartbeat_sequence()
-                    # nouveau rythme pour le bloc qui suit
-                    self.tirer_cycles_perceuses()
         finally:
             # quoi qu'il arrive — y compris sur une exception en pleine routine —
             # rien ne doit rester en marche sans surveillance
