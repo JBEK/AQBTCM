@@ -95,6 +95,7 @@ class TunerApp:
     def __init__(self, root):
         self.root = root
         root.title("Réglage du son du coeur")
+        root.geometry("900x700")
 
         self.vars = {}
         self.value_labels = {}
@@ -104,8 +105,43 @@ class TunerApp:
         self.pre_drag_snapshot = None
         root.bind_all("<Control-z>", self._undo)
 
-        columns = tk.Frame(root)
-        columns.pack(padx=10, pady=10, fill="both", expand=True)
+        # Boutons et statut épinglés en bas (toujours visibles, quelle que
+        # soit la taille de la fenêtre) : packés AVANT la zone scrollable,
+        # avec side="bottom", pour qu'ils gardent leur place en premier.
+        controls = tk.Frame(root)
+        controls.pack(side="bottom", pady=10)
+        self.play_button = tk.Button(controls, text="Jouer", command=self.toggle_play)
+        self.play_button.grid(row=0, column=0, padx=5)
+        tk.Button(controls, text="Valider ces réglages", command=self.validate).grid(row=0, column=1, padx=5)
+        tk.Button(controls, text="Réinitialiser (son de base)", command=self.reset_to_base).grid(row=0, column=2, padx=5)
+        tk.Button(controls, text="Charger derniers réglages enregistrés",
+                  command=self.load_saved).grid(row=0, column=3, padx=5)
+
+        self.status = tk.Label(root, text="Prêt.", anchor="w")
+        self.status.pack(side="bottom", fill="x", padx=10, pady=(0, 10))
+
+        # Zone scrollable pour les curseurs : une Canvas + Scrollbar, avec les
+        # 2 colonnes de sections dedans. Nécessaire car les sliders ne
+        # tiennent pas tous dans la hauteur de l'écran.
+        scroll_area = tk.Frame(root)
+        scroll_area.pack(side="top", fill="both", expand=True, padx=10, pady=10)
+
+        canvas = tk.Canvas(scroll_area, highlightthickness=0)
+        scrollbar = tk.Scrollbar(scroll_area, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        columns = tk.Frame(canvas)
+        columns_window = canvas.create_window((0, 0), window=columns, anchor="nw")
+        columns.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(columns_window, width=e.width))
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
         left = tk.Frame(columns)
         right = tk.Frame(columns)
         left.grid(row=0, column=0, sticky="n", padx=(0, 20))
@@ -117,18 +153,6 @@ class TunerApp:
             self._build_section(left, section)
         for section in right_sections:
             self._build_section(right, section)
-
-        controls = tk.Frame(root)
-        controls.pack(pady=10)
-        self.play_button = tk.Button(controls, text="Jouer", command=self.toggle_play)
-        self.play_button.grid(row=0, column=0, padx=5)
-        tk.Button(controls, text="Valider ces réglages", command=self.validate).grid(row=0, column=1, padx=5)
-        tk.Button(controls, text="Réinitialiser (son de base)", command=self.reset_to_base).grid(row=0, column=2, padx=5)
-        tk.Button(controls, text="Charger derniers réglages enregistrés",
-                  command=self.load_saved).grid(row=0, column=3, padx=5)
-
-        self.status = tk.Label(root, text="Prêt.", anchor="w")
-        self.status.pack(fill="x", padx=10, pady=(0, 10))
 
         self.playing = False
 
