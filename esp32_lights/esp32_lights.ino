@@ -35,8 +35,9 @@ enum OpMode { NONE, MORSE, HEARTBEAT, MANUAL_PWM, FADEOUT };
 OpMode currentOpMode = NONE;
 
 // ---- Réglages morse (ms, luminosité 0-255) ----
-// Soliste : fondu rapide, plein régime.
-const int SOLISTE_LO = 0;
+// Soliste : fondu rapide, plein régime. Ne descend jamais sous 80 : entre deux
+// symboles il reste en veilleuse au lieu de retomber au noir.
+const int SOLISTE_LO = 80;
 const int SOLISTE_HI = 255;
 const int SOLISTE_FADE_MS = 90;
 const unsigned long SOLISTE_DOT_MS = 200;
@@ -408,7 +409,7 @@ void avancerMorse() {
 // début après le battement, côté Pi.
 //
 // Le fondu part d'un niveau fixe et non du niveau instantané du morse : le
-// morse clignote, et le soliste est à 0 entre deux symboles (là où il passe
+// morse clignote, et le soliste est au plancher entre deux symboles (là où il passe
 // le plus clair de son temps). Partir de l'instantané donnait donc un fondu
 // de 0 vers 0 — invisible — une fois sur deux.
 const int FONDU_DEPART = 140;
