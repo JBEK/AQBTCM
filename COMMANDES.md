@@ -5,6 +5,40 @@ Chaque carte répond `ID?` par son nom pour s'identifier.
 
 ---
 
+## ⚠️ Alimentation — panne du Raspberry Pi 4 (oct. 2026) et corrections
+
+**Ce qui s'est passé** : plantages USB répétés, puis le Pi 4 s'est éteint d'un
+coup et ne redémarre plus (LED rouge fixe). Hypothèse retenue : chaque ESP32
+était alimenté à la fois par USB (depuis le Pi) **et** en externe via VIN, sur
+une carte où USB-5V et VIN sont reliés en interne sans isolation — avec en
+plus deux alimentations à découpage différentes pour les deux ESP32. Ça a pu
+faire remonter du courant par l'USB vers le circuit d'alimentation du Pi
+(back-powering), aggravé par un possible écart de masse entre les deux alims
+(boucle de masse).
+
+**Correction à appliquer au remontage** :
+1. Chaque **ESP32** est alimenté **uniquement par USB** (PC/Pi) — plus
+   d'alimentation externe sur sa broche VIN.
+2. Les **modules** qui ont besoin de plus de courant/tension (PCA9685 +
+   MOSFETs côté lumières, drivers TMC2209 + moteurs côté perceuses) gardent
+   leur alimentation 24V externe, comme prévu depuis le début.
+3. Toutes les **masses reliées en un seul point** (étoile) : PC/ESP32, chaque
+   alim 24V — pas de chaîne de masse d'une carte à l'autre.
+4. Si possible, **une seule alimentation 24V** pour les deux cartes plutôt que
+   deux différentes ; sinon, au moins les brancher sur la même multiprise.
+
+**Protections ajoutées en plus** :
+- 2× isolateur USB **ADuM3160** (1500V, 12 Mbps), un entre le PC et chaque
+  ESP32 — modèle choisi : dongle scellé USB-A mâle/femelle, aucun réglage/jumper.
+- 1 ferrite (tore) clipsé sur chaque câble USB.
+
+**Avant de tout rebrancher** : câble USB débranché, mesurer au multimètre
+l'écart de tension entre la masse de chaque alimentation 24V et la masse du
+PC/Pi. Un écart de plusieurs volts indique un vrai problème de câblage
+électrique à régler avant de reconnecter quoi que ce soit.
+
+---
+
 ## ESP32_MOTORS (perceuses)
 
 ### Identification
