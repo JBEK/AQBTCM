@@ -347,18 +347,16 @@ void declamerTexte(const String& texte) {
   lancerSoliste(code);
 }
 
-// Ancien format "M:<soliste>|<phrase>|*<mot>*" : le chœur récite son mot dès
-// le début de la phrase.
-void declamerAncien(const String& phrase, const String& motChoeur) {
-  triggerCount = 0;
+// Mot de départ des chœurs ("M:<soliste>|<phrase>|*<mot>*") : s'ils sont
+// éteints (début de routine, reprise après le battement), ils le récitent
+// dès la première lettre du soliste. S'ils récitent déjà, on les laisse.
+void lancerChoeurSiEteint(const String& motChoeur) {
+  if (choeurActif) return;
   String motCode = phraseToMorse(motChoeur);
-  if (motCode.length() > 0) {
-    triggerIndex[0] = 0;
-    triggerCode[0] = motCode;
-    triggerFired[0] = false;
-    triggerCount = 1;
-  }
-  lancerSoliste(phraseToMorse(phrase));
+  if (motCode.length() == 0) return;
+  voiceStart(choeur, motCode);
+  choeurActif = true;
+  choeurSwapEnAttente = false;
 }
 
 // Avance soliste + chœurs d'un cran (appelé à chaque tour de loop()).
@@ -402,9 +400,11 @@ void avancerMorse() {
   }
 }
 
-// ---- Fondu de sortie (F:<ms>) ----
+// ---- Fondu de sortie (F:<ms>[:<plancher>]) ----
 // Avant le battement de cœur, on ne coupe plus les lumières d'un coup : les
-// trois luminaires descendent ensemble vers le noir. Le morse n'avance plus
+// trois luminaires descendent ensemble jusqu'au plancher (0 par défaut), où
+// ils restent une fois le fondu fini — jamais éteints pendant la routine si
+// le Pi envoie un plancher. Le morse n'avance plus
 // pendant ce fondu — la phrase en cours est de toute façon relue depuis le
 // début après le battement, côté Pi.
 //
@@ -416,11 +416,13 @@ const int FONDU_DEPART = 140;
 
 unsigned long fadeOutStart = 0;
 unsigned long fadeOutDuree = 0;
+int fadeOutPlancher = 0;
 int lastFadeLevel = -1;
 
-void lancerFadeOut(unsigned long dureeMs) {
+void lancerFadeOut(unsigned long dureeMs, int plancher) {
   fadeOutStart = millis();
   fadeOutDuree = (dureeMs < 1) ? 1 : dureeMs;
+  fadeOutPlancher = constrain(plancher, 0, FONDU_DEPART);
   lastFadeLevel = -1;
   currentOpMode = FADEOUT;
 }
@@ -428,11 +430,15 @@ void lancerFadeOut(unsigned long dureeMs) {
 void avancerFadeOut() {
   unsigned long t = millis() - fadeOutStart;
   if (t >= fadeOutDuree) {
-    resetAllModes();
+    resetAllModes();  // arrête morse et chœurs (et passe tout à 0)...
+    setGroupPWM(channelsA, fadeOutPlancher);  // ...puis tient le plancher
+    setGroupPWM(channelsB, fadeOutPlancher);
+    setGroupPWM(channelsC, fadeOutPlancher);
     currentOpMode = NONE;
     return;
   }
-  int niveau = (int)(FONDU_DEPART * (1.0f - (float)t / (float)fadeOutDuree));
+  int niveau = FONDU_DEPART -
+               (int)((FONDU_DEPART - fadeOutPlancher) * (float)t / (float)fadeOutDuree);
   if (niveau == lastFadeLevel) return;
   setGroupPWM(channelsA, niveau);
   setGroupPWM(channelsB, niveau);
@@ -441,8 +447,7 @@ void avancerFadeOut() {
 }
 
 // ---- Commande M ----
-// Nouveau format : M:<soliste>|<phrase avec *mots* marqués>
-// Ancien format  : M:<soliste>|<phrase>|*<mot>*
+// M:<soliste>|<phrase avec *mots* marqués>[|*<mot de départ des chœurs>*]
 void traiterCommandeM() {
   // M enchaîné à un autre M : on garde les chœurs en cours (ils continuent
   // pendant la phrase suivante). Depuis un autre mode : on repart propre.
@@ -470,8 +475,8 @@ void traiterCommandeM() {
       Serial.println("ERR_FORMAT_M");
       return;
     }
-    declamerAncien(serialBuffer.substring(pos2 + 1, pos3),
-                   serialBuffer.substring(etoile1 + 1, etoile2));
+    declamerTexte(serialBuffer.substring(pos2 + 1, pos3));
+    lancerChoeurSiEteint(serialBuffer.substring(etoile1 + 1, etoile2));
   }
 }
 
@@ -552,7 +557,10 @@ void loop() {
         }
 
       } else if (serialBuffer.startsWith("F:")) {
-        lancerFadeOut((unsigned long)serialBuffer.substring(2).toInt());
+        String arg = serialBuffer.substring(2);
+        int sep = arg.indexOf(':');
+        int plancher = (sep == -1) ? 0 : arg.substring(sep + 1).toInt();
+        lancerFadeOut((unsigned long)arg.toInt(), plancher);
 
       } else if (serialBuffer.startsWith("H:")) {
         String arg = serialBuffer.substring(2);

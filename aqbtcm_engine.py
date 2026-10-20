@@ -98,8 +98,12 @@ class Installation:
         self.heartbeat_every_s = 300            # battement toutes les 5 min de lecture
         self.heartbeat_duration_s = 35          # durée du battement (son + lumière)
         self.heartbeat_music_fade_s = 4         # descente / remontée de la musique autour du battement
-        self.heartbeat_silence_after_s = 3      # noir et silence entre la fin du battement et la reprise
-        self.lights_fade_out_ms = 6000          # descente des lumières vers le noir avant le battement
+        self.heartbeat_silence_after_s = 3      # pause lumière basse et silence entre la fin du battement et la reprise
+        self.lights_fade_out_ms = 6000          # descente des lumières vers le plancher avant le battement
+        # Pendant la routine les luminaires ne sont jamais éteints : avant la
+        # première phrase, à la fin du fondu qui précède le battement et dans
+        # la pause qui le suit, ils restent à ce niveau (0-255).
+        self.lights_plancher = 50
         # Forme du battement lumineux. Suivre directement la courbe ECG donnait
         # un clignotement : normalisée, elle est agitée en permanence (allumée
         # 97% du temps), sans repos entre les battements. Et un seul bond par
@@ -114,7 +118,7 @@ class Installation:
         # noir complet : elle reste à ce niveau plancher (0-255), pour un
         # fondu plus doux (moins de contraste entre "rien" et le pic du bond)
         self.heartbeat_pwm_repos = 30
-        self.heartbeat_pwm_pic = 90
+        self.heartbeat_pwm_pic = 120
         # comme un vrai cœur, le deuxième bond (dub) monte moins haut que le
         # premier (lub) : 1.0 = même hauteur, 0.5 = dub à mi-chemin entre le
         # repos et le pic du lub
@@ -154,7 +158,7 @@ class Installation:
         # la Machine 1 : leur rampe accel/décel de 5s par sens (ACCEL_MS/
         # DECEL_MS dans le firmware) refuse tout cycle complet sous 20s.
         self.perceuses_cycle_s = {
-            1: (10, 40),
+            1: (6, 20),
             2: (20, 40),
             3: (20, 40),
         }
@@ -302,12 +306,12 @@ class Installation:
             self.set_cw(groupe, 0)
 
     def lights_fade_out(self, duree_ms=None):
-        """Fait redescendre en douceur vers le noir ce qui est allumé côté
-        morse (soliste + chœurs), au lieu de la coupure sèche d'avant. Le
-        fondu est calculé par l'ESP32 (non bloquant de son côté) ; ici on
-        attend juste qu'il ait fini."""
+        """Fait redescendre en douceur jusqu'à lights_plancher ce qui est
+        allumé côté morse (soliste + chœurs), au lieu de la coupure sèche
+        d'avant. Le fondu est calculé par l'ESP32 (non bloquant de son côté) ;
+        ici on attend juste qu'il ait fini."""
         duree_ms = self.lights_fade_out_ms if duree_ms is None else duree_ms
-        self._send_lights(f"F:{int(duree_ms)}")
+        self._send_lights(f"F:{int(duree_ms)}:{self.lights_plancher}")
         self.stop_flag.wait(duree_ms / 1000)
 
     def test_ww_sequence(self):
@@ -396,6 +400,21 @@ class Installation:
         phrases = [p.strip() for p in re.split(r"\.\s*", texte) if p.strip()]
         print(f"{len(phrases)} phrases extraites du fichier.")
 
+        # Mot de départ des chœurs pour chaque phrase, envoyé avec elle : ils
+        # sont éteints au début de la routine et après chaque battement, et
+        # doivent déjà réciter quand le soliste commence (l'ESP l'ignore s'ils
+        # récitent déjà). C'est le dernier mot marqué que le soliste a atteint
+        # avant cette phrase, ou à défaut le premier mot marqué du texte.
+        mots_marques = [re.findall(r"\*([^*]+)\*", " ".join(sans_accents(p).split()))
+                        for p in phrases]
+        premier_mot = next((m for mots in mots_marques for m in mots), None)
+        mot_depart = []
+        dernier_mot = None
+        for mots in mots_marques:
+            mot_depart.append(dernier_mot or premier_mot)
+            if mots:
+                dernier_mot = mots[-1]
+
         # La lecture ne doit JAMAIS s'arrêter d'elle-même : c'est la colonne
         # vertébrale de l'installation. Après quelques échecs de suite sur une
         # phrase on passe à la suivante (relire une phrase ou en sauter une est
@@ -420,6 +439,8 @@ class Installation:
                 phrase_nettoyee = phrase.replace("*", "")
 
                 cmd = f"M:{soliste[i % len(soliste)]}|{phrase}"
+                if mot_depart[i]:
+                    cmd += f"|*{mot_depart[i]}*"
                 if self.ser_lights and self.ser_lights.is_open:
                     with self._lock_lights:
                         self.ser_lights.reset_input_buffer()  # purge les anciens "OK" (ex: commandes P)
@@ -645,11 +666,14 @@ class Installation:
     # ==================== BATTEMENT DE CŒUR ====================
     def run_heartbeat_sequence(self, duration_s=None, update_hz=None):
         """Interruption battement de cœur :
-        1. les perceuses s'arrêtent et les lumières s'éteignent (fin de la lecture morse)
+        1. les perceuses s'arrêtent et les lumières descendent au plancher (fin de la lecture morse)
         2. la musique descend jusqu'au silence
         3. le cœur bat, en son (HeartbeatSonifier) et en lumière, pendant duration_s
-        4. tout s'éteint, un temps de noir et de silence
+        4. lumière au plancher, un temps de silence
         5. les perceuses repartent, la musique remonte, et l'appelant reprend la lecture
+
+        Hors routine (bouton de test), les lumières s'éteignent à la fin au
+        lieu de rester au plancher.
         """
         duration_s = self.heartbeat_duration_s if duration_s is None else duration_s
         # un seul battement à la fois : deux en parallèle écrasent le flux audio
@@ -665,8 +689,9 @@ class Installation:
         self._heartbeat_active.set()
         try:
             self._send_motors("H:START")
-            self.lights_fade_out()    # descente douce de ce qui est allumé vers le noir
-            self._send_lights("H:0")  # entre en mode battement, déjà au noir : coupe morse et chœurs
+            plancher = f"H:{self.lights_plancher}"
+            self.lights_fade_out()    # descente douce de ce qui est allumé vers le plancher
+            self._send_lights(plancher)  # entre en mode battement, au plancher : coupe morse et chœurs
 
             if musique_jouait:
                 self._fondu_musique(0.0, self.heartbeat_music_fade_s)
@@ -703,12 +728,16 @@ class Installation:
                     time.sleep(periode)
                 self.sonifier.stop()
 
-            self._send_lights("H:STOP")  # tout s'éteint
+            self._send_lights(plancher)
             if not self.stop_flag.is_set():
                 self.stop_flag.wait(self.heartbeat_silence_after_s)
         finally:
             self.sonifier.stop(fade_ms=0)
-            self._send_lights("H:STOP")
+            # en routine, la lumière reste au plancher jusqu'à la phrase suivante
+            if self._routine_en_cours.locked() and not self.stop_flag.is_set():
+                self._send_lights(f"H:{self.lights_plancher}")
+            else:
+                self._send_lights("H:STOP")
             self._send_motors("H:STOP")
             if musique_jouait and not self.stop_flag.is_set():
                 # la musique remonte en tâche de fond, pendant que la lecture reprend
@@ -781,6 +810,7 @@ class Installation:
             print("Routine lancée.")
 
             self.smoke_pulse(repeats=0)
+            self._send_lights(f"H:{self.lights_plancher}")  # pas de noir avant la première phrase
             self.music_start(volume=1.0)
             self.demarrer_perceuses_aleatoire()
 
