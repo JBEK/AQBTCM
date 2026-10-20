@@ -47,7 +47,7 @@ const unsigned long SOLISTE_WORD_PAUSE_MS = 1400;
 
 // Chœurs : fondu lent, lumière douce (jamais au maximum), récitent en boucle.
 const int CHOEUR_LO = 20;
-const int CHOEUR_HI = 120;
+const int CHOEUR_HI = 190;
 const int CHOEUR_FADE_MS = 550;
 const unsigned long CHOEUR_DOT_MS = 600;
 const unsigned long CHOEUR_DASH_MS = 1800;

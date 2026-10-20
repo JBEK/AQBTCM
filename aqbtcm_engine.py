@@ -118,7 +118,7 @@ class Installation:
         # noir complet : elle reste à ce niveau plancher (0-255), pour un
         # fondu plus doux (moins de contraste entre "rien" et le pic du bond)
         self.heartbeat_pwm_repos = 30
-        self.heartbeat_pwm_pic = 120
+        self.heartbeat_pwm_pic = 180
         # comme un vrai cœur, le deuxième bond (dub) monte moins haut que le
         # premier (lub) : 1.0 = même hauteur, 0.5 = dub à mi-chemin entre le
         # repos et le pic du lub
