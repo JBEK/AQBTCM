@@ -172,7 +172,7 @@ class Installation:
         self.perceuses_pause_max_s = 60
         self.music_volume = 0.6
         self.smoke_pulse_ms = 300
-        self.smoke_period_ms = 4000
+        self.smoke_period_ms = 20000
 
     # ==================== CONNEXION ====================
     def connect(self, baudrate=115200, timeout=1):

@@ -340,6 +340,56 @@ void handleCommand(const String& cmd) {
   }
 }
 
+// Réglages des drivers : ils vivent dans les registres du TMC2209 et sont
+// perdus quand l'alimentation moteurs est coupée — l'ESP32, alimenté par
+// l'USB, ne le voit pas. Appliqués au démarrage, puis par surveillerDrivers()
+// aux drivers qui n'étaient pas encore alimentés à ce moment-là.
+bool driverPret[3] = {false, false, false};
+
+void configurerDriver(int i) {
+  drivers[i].begin();
+  drivers[i].toff(5);
+  // le courant ne doit dépendre QUE du logiciel, pas du potentiomètre de la carte
+  drivers[i].I_scale_analog(false);
+  drivers[i].rms_current(COURANT_MA[i], MAINTIEN);
+  drivers[i].microsteps(MICROSTEPS);
+  drivers[i].en_spreadCycle(true);  // couple garanti quelles que soient charge et vitesse
+  // mode 2 des 3 testés (SpreadCycle + interpolation 256 micropas interne) :
+  // intpol ne coûte aucun couple (aucune impulsion supplémentaire à
+  // envoyer), juste une forme d'onde plus douce - donc au moins aussi bon
+  // que le mode 1 pour le couple, en plus lisse.
+  drivers[i].intpol(true);
+  driverPret[i] = (drivers[i].microsteps() == MICROSTEPS);  // réglages bien reçus
+
+  Serial.print("Moteur "); Serial.print(i);
+  Serial.print(" courant applique = "); Serial.print(drivers[i].rms_current());
+  Serial.print(" mA (maintien "); Serial.print(drivers[i].cs2rms(drivers[i].ihold()));
+  Serial.print(" mA), potentiometre ");
+  Serial.println(drivers[i].I_scale_analog() ? "PRIS EN COMPTE (!)" : "ignore");
+}
+
+// Permet d'allumer l'alimentation moteurs après l'ESP32 : toutes les
+// CONTROLE_DRIVERS_MS, on réessaie de configurer les drivers qui ne l'ont pas
+// encore été. Une fois les trois prêts, on ne les interroge plus jamais
+// (une lecture UART bloque quelques ms, on ne veut pas hacher les rotations).
+// Revers : une coupure de l'alim moteurs en cours de route n'est pas
+// rattrapée — il faut alors redémarrer l'ESP32.
+const unsigned long CONTROLE_DRIVERS_MS = 2000;
+unsigned long dernierControleDrivers = 0;
+
+void surveillerDrivers() {
+  if (driverPret[0] && driverPret[1] && driverPret[2]) return;
+  if (millis() - dernierControleDrivers < CONTROLE_DRIVERS_MS) return;
+  dernierControleDrivers = millis();
+  for (int i = 0; i < 3; i++) {
+    if (driverPret[i]) continue;
+    if (drivers[i].test_connection() != 0) continue;   // pas encore alimenté
+    Serial.print("DRIVER_CONFIGURE_EN_RETARD:D");
+    Serial.println(i + 1);
+    configurerDriver(i);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -356,27 +406,10 @@ void setup() {
     cycleEnAttenteMs[i] = 0;
     pauseImposeeMs[i] = 0;
 
-    drivers[i].begin();
     uint8_t statut = drivers[i].test_connection();
     Serial.print("Moteur "); Serial.print(i); Serial.print(" test_connection() = "); Serial.print(statut);
     Serial.println(statut == 0 ? "  -> OK, driver present" : "  -> ECHEC, pas de reponse UART");
-    drivers[i].toff(5);
-    // le courant ne doit dépendre QUE du logiciel, pas du potentiomètre de la carte
-    drivers[i].I_scale_analog(false);
-    drivers[i].rms_current(COURANT_MA[i], MAINTIEN);
-    drivers[i].microsteps(MICROSTEPS);
-    drivers[i].en_spreadCycle(true);  // couple garanti quelles que soient charge et vitesse
-    // mode 2 des 3 testés (SpreadCycle + interpolation 256 micropas interne) :
-    // intpol ne coûte aucun couple (aucune impulsion supplémentaire à
-    // envoyer), juste une forme d'onde plus douce - donc au moins aussi bon
-    // que le mode 1 pour le couple, en plus lisse.
-    drivers[i].intpol(true);
-
-    Serial.print("Moteur "); Serial.print(i);
-    Serial.print(" courant applique = "); Serial.print(drivers[i].rms_current());
-    Serial.print(" mA (maintien "); Serial.print(drivers[i].cs2rms(drivers[i].ihold()));
-    Serial.print(" mA), potentiometre ");
-    Serial.println(drivers[i].I_scale_analog() ? "PRIS EN COMPTE (!)" : "ignore");
+    configurerDriver(i);
   }
 
   Serial.println("AQBTCM_MOTORS prêt.");
@@ -402,4 +435,5 @@ void loop() {
   }
 
   for (int i = 0; i < 3; i++) updateMotor(i);
+  surveillerDrivers();
 }
