@@ -158,8 +158,14 @@ class Installation:
             2: (20, 40),
             3: (20, 40),
         }
-        self.perceuses_pause_min_s = 30
-        self.perceuses_pause_max_s = 240
+        # Pause entre le sens horaire et l'antihoraire, tirée au hasard à
+        # chaque cycle et envoyée au firmware (D<n>:PAUSE:<ms>). Ajoutée à
+        # l'attente côté Pi, sinon le STOP tombe pendant le sens antihoraire
+        # et le coupe (voire l'empêche de démarrer).
+        self.perceuses_pause_entre_sens_min_s = 5
+        self.perceuses_pause_entre_sens_max_s = 20
+        self.perceuses_pause_min_s = 15
+        self.perceuses_pause_max_s = 60
         self.music_volume = 0.6
         self.smoke_pulse_ms = 300
         self.smoke_period_ms = 4000
@@ -478,6 +484,11 @@ class Installation:
         d'une rotation. Evite de reflasher pour ajuster un rythme."""
         self._send_motors(f"D{drill_num}:CYCLE:{int(duree_s * 1000)}")
 
+    def drill_set_pause_sens(self, drill_num, duree_s):
+        """Fixe la pause entre le sens horaire et l'antihoraire (prise en
+        compte au prochain changement de sens, à envoyer avant le START)."""
+        self._send_motors(f"D{drill_num}:PAUSE:{int(duree_s * 1000)}")
+
     def demarrer_perceuses_aleatoire(self):
         """Lance pour chaque perceuse une boucle en tâche de fond
         (_boucle_perceuse) : premier départ à un instant tiré au hasard dans
@@ -510,10 +521,16 @@ class Installation:
 
             cycle_min, cycle_max = self.perceuses_cycle_s[drill_num]
             duree_cycle = random.uniform(cycle_min, cycle_max)
+            pause_sens = random.uniform(self.perceuses_pause_entre_sens_min_s,
+                                        self.perceuses_pause_entre_sens_max_s)
             self.drill_set_cycle(drill_num, duree_cycle / 2)
+            self.drill_set_pause_sens(drill_num, pause_sens)
             self.drill_start(drill_num)
-            print(f"Perceuse {drill_num} : cycle de {duree_cycle:.0f}s")
-            if self.stop_flag.wait(duree_cycle):
+            print(f"Perceuse {drill_num} : cycle de {duree_cycle:.0f}s, "
+                  f"pause entre sens {pause_sens:.0f}s")
+            # +1 s de marge pour que le sens antihoraire finisse avant le STOP
+            attente = duree_cycle + pause_sens + 1
+            if self.stop_flag.wait(attente):
                 break
 
             self.drill_stop(drill_num)

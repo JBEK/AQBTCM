@@ -55,6 +55,10 @@ const unsigned long PAUSE_MS[3][2] = {   // pause après CE sens, avant de repar
   {15000, 20000},  // Machines 2 et 3 : longues pauses, elles tournent moins
   {15000, 20000},  // souvent donc chauffent moins
 };
+// Pause entre horaire et antihoraire imposée par le Pi (D<n>:PAUSE:<ms>), qui
+// la tire au hasard à chaque cycle. 0 = rien reçu : repli sur PAUSE_MS. La
+// pause après l'antihoraire reste celle de PAUSE_MS (le Pi coupe pendant).
+unsigned long pauseImposeeMs[3];
 
 // Vitesses exprimées en RPM (et non plus en µs de délai) : c'est ce qui
 // détermine si le moteur tient ou décroche, donc autant le lire directement.
@@ -211,7 +215,9 @@ void updateMotor(int id) {
   int dirIdx = m.dir ? 0 : 1;
 
   if (m.phase == PAUSED) {
-    if (elapsed >= PAUSE_MS[id][dirIdx]) {
+    unsigned long pause = PAUSE_MS[id][dirIdx];
+    if (dirIdx == 0 && pauseImposeeMs[id]) pause = pauseImposeeMs[id];
+    if (elapsed >= pause) {
       // fin de la pause : repart dans l'autre sens
       appliquerCycleEnAttente(id);
       m.dir = !m.dir;
@@ -310,6 +316,15 @@ void handleCommand(const String& cmd) {
         Serial.print(":");
         Serial.println(ms);
       }
+    } else if (action.startsWith("PAUSE:")) {
+      // D<n>:PAUSE:<ms> — pause entre le sens horaire et l'antihoraire. Lue
+      // au moment où la pause commence, donc à envoyer avant le START.
+      unsigned long ms = (unsigned long)action.substring(6).toInt();
+      pauseImposeeMs[id] = ms;
+      Serial.print("OK_PAUSE:D");
+      Serial.print(num);
+      Serial.print(":");
+      Serial.println(ms);
     } else {
       Serial.println("ERR_FORMAT_D");
     }
@@ -339,6 +354,7 @@ void setup() {
     motors[i] = {false, true, RUNNING, 0, 0, 0, false};
     cycleActifMs[i] = CYCLE_MS[i];
     cycleEnAttenteMs[i] = 0;
+    pauseImposeeMs[i] = 0;
 
     drivers[i].begin();
     uint8_t statut = drivers[i].test_connection();
