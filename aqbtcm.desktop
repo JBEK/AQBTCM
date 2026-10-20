@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=AQBTCM
+Comment=Lancer et arrêter l'installation
+Exec=/home/debian/AQBTCM/.venv/bin/python /home/debian/AQBTCM/aqbtcm_app.py
+Path=/home/debian/AQBTCM
+Icon=/home/debian/AQBTCM/aqbtcm_icon.png
+Terminal=false
+Categories=AudioVideo;
+StartupWMClass=aqbtcm

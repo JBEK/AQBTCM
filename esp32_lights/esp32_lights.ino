@@ -178,8 +178,13 @@ bool liaisonVue = false;
 bool coupeParGardeFou = false;
 
 // ---- PWM ----
+// Luminosité maximale de toutes les sorties, envoyée par le Pi (L:<0-255>) :
+// plus basse la nuit. Appliquée ici, au plus bas niveau, pour valoir dans
+// tous les modes sans toucher à leurs réglages.
+int limiteLumiere = 255;
+
 void setChannelPWM(uint8_t channel, int brightness255) {
-  brightness255 = constrain(brightness255, 0, 255);
+  brightness255 = constrain(brightness255, 0, limiteLumiere);
   uint16_t duty = map(brightness255, 0, 255, 0, 4095);
   pwm.setPWM(channel, 0, duty);
 }
@@ -534,6 +539,11 @@ void loop() {
 
       } else if (serialBuffer == "ID?") {
         Serial.println("AQBTCM_LIGHTS");
+
+      // Limite de luminosité : silencieuse comme PING (renvoyée toutes les
+      // ~2 s), et sans effet sur le mode en cours.
+      } else if (serialBuffer.startsWith("L:")) {
+        limiteLumiere = constrain(serialBuffer.substring(2).toInt(), 0, 255);
 
       } else if (serialBuffer.startsWith("M:")) {
         traiterCommandeM();

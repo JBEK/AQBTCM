@@ -7,6 +7,7 @@ routine complète. Aucun code d'interface graphique - c'est routine_2026.py
 qui affiche la fenêtre et appelle les méthodes de la classe Installation.
 """
 
+import datetime
 import inspect
 import json
 import math
@@ -41,6 +42,36 @@ def sans_accents(texte):
     texte = (texte.replace("œ", "oe").replace("Œ", "OE")
                   .replace("æ", "ae").replace("Æ", "AE"))
     return "".join(c for c in unicodedata.normalize("NFD", texte) if not unicodedata.combining(c))
+
+
+def heures_soleil(jour, lat, lon):
+    """Lever et coucher du soleil (datetime UTC) le jour `jour` (date) au
+    point lat/lon, en degrés (est positif). Algorithme de l'Almanac for
+    Computers (US Naval Observatory), précis à la minute près : largement
+    assez pour savoir s'il fait nuit, sans dépendance à installer."""
+    zenith = math.radians(90.833)  # centre du soleil sous l'horizon + réfraction
+    n = jour.timetuple().tm_yday
+    lng_heures = lon / 15
+
+    def _calcul(lever):
+        t = n + ((6 if lever else 18) - lng_heures) / 24
+        m = 0.9856 * t - 3.289
+        l = (m + 1.916 * math.sin(math.radians(m))
+             + 0.020 * math.sin(math.radians(2 * m)) + 282.634) % 360
+        ra = math.degrees(math.atan(0.91764 * math.tan(math.radians(l)))) % 360
+        ra = (ra + (math.floor(l / 90) - math.floor(ra / 90)) * 90) / 15
+        sin_dec = 0.39782 * math.sin(math.radians(l))
+        cos_dec = math.cos(math.asin(sin_dec))
+        cos_h = ((math.cos(zenith) - sin_dec * math.sin(math.radians(lat)))
+                 / (cos_dec * math.cos(math.radians(lat))))
+        cos_h = max(-1.0, min(1.0, cos_h))  # nuit/jour polaire : sans objet ici
+        h = math.degrees(math.acos(cos_h))
+        h = (360 - h if lever else h) / 15
+        ut = (h + ra - 0.06571 * t - 6.622 - lng_heures) % 24
+        minuit = datetime.datetime.combine(jour, datetime.time(), datetime.timezone.utc)
+        return minuit + datetime.timedelta(hours=ut)
+
+    return _calcul(True), _calcul(False)
 
 
 REGLAGES_SON_COEUR = "heartbeat_settings.json"
@@ -96,7 +127,7 @@ class Installation:
         # réglages tunables de la routine (pas de "bonne" valeur imposée par
         # le matériel : à ajuster à l'œil / à l'oreille sur place)
         self.heartbeat_every_s = 300            # battement toutes les 5 min de lecture
-        self.heartbeat_duration_s = 35          # durée du battement (son + lumière)
+        self.heartbeat_duration_s = 90          # durée du battement (son + lumière)
         self.heartbeat_music_fade_s = 4         # descente / remontée de la musique autour du battement
         self.heartbeat_silence_after_s = 3      # pause lumière basse et silence entre la fin du battement et la reprise
         self.lights_fade_out_ms = 6000          # descente des lumières vers le plancher avant le battement
@@ -104,6 +135,14 @@ class Installation:
         # première phrase, à la fin du fondu qui précède le battement et dans
         # la pause qui le suit, ils restent à ce niveau (0-255).
         self.lights_plancher = 50
+        # La nuit (entre le coucher et le lever du soleil au lieu de
+        # l'installation), aucun luminaire ne dépasse lights_max_nuit : la
+        # limite est appliquée par l'ESP32 à chaque sortie, quel que soit le
+        # mode (morse, battement, fondu, manuel).
+        self.lieu_lat = 48.8566   # Paris
+        self.lieu_lon = 2.3522
+        self.lights_max_nuit = 180
+        self._limite_envoyee = None
         # Forme du battement lumineux. Suivre directement la courbe ECG donnait
         # un clignotement : normalisée, elle est agitée en permanence (allumée
         # 97% du temps), sans repos entre les battements. Et un seul bond par
@@ -172,7 +211,7 @@ class Installation:
         self.perceuses_pause_max_s = 60
         self.music_volume = 0.6
         self.smoke_pulse_ms = 300
-        self.smoke_period_ms = 20000
+        self.smoke_period_ms = 25000
 
     # ==================== CONNEXION ====================
     def connect(self, baudrate=115200, timeout=1):
@@ -251,8 +290,22 @@ class Installation:
             while not self._ping_stop.wait(self.ping_period_s):
                 self._send_lights("PING")
                 self._send_motors("PING")
+                # renvoyée à chaque tour : l'ESP repart à 255 s'il redémarre
+                self._send_lights(f"L:{self.limite_lumiere()}")
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def limite_lumiere(self):
+        """Luminosité maximale autorisée maintenant : lights_max_nuit la nuit,
+        255 le jour."""
+        maintenant = datetime.datetime.now(datetime.timezone.utc)
+        lever, coucher = heures_soleil(maintenant.date(), self.lieu_lat, self.lieu_lon)
+        limite = 255 if lever <= maintenant < coucher else self.lights_max_nuit
+        if limite != self._limite_envoyee:
+            print(f"[LIGHTS] {'jour' if limite == 255 else 'nuit'} : luminosité max {limite} "
+                  f"(lever {lever.astimezone():%H:%M}, coucher {coucher.astimezone():%H:%M})")
+            self._limite_envoyee = limite
+        return limite
 
     # ==================== ENVOI BAS NIVEAU ====================
     def raw_lights(self, cmd):
@@ -781,6 +834,17 @@ class Installation:
     @property
     def verrouille(self):
         return self._verrouille
+
+    @property
+    def routine_en_cours(self):
+        return self._routine_en_cours.locked()
+
+    def etat_connexions(self):
+        """(lights_ok, motors_ok) : la carte a été trouvée ET son port existe
+        encore (un câble USB débranché fait disparaître le /dev/ttyUSB*)."""
+        def _ok(ser):
+            return ser is not None and ser.is_open and os.path.exists(ser.port)
+        return _ok(self.ser_lights), _ok(self.ser_motors)
 
     # ==================== ROUTINE COMPLÈTE ====================
     def routine(self):
