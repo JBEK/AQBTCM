@@ -158,7 +158,7 @@ class Installation:
         # la Machine 1 : leur rampe accel/décel de 5s par sens (ACCEL_MS/
         # DECEL_MS dans le firmware) refuse tout cycle complet sous 20s.
         self.perceuses_cycle_s = {
-            1: (6, 20),
+            1: (6, 14),
             2: (20, 40),
             3: (20, 40),
         }
